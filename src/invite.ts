@@ -138,56 +138,141 @@ export function buildInviteClaim(input: {
 
 export function buildAgentInstructions(input: {
   invite: Pick<OrgInvite, "slug" | "name">;
+  /** Path where the inviter wrote the secret file (for their transfer notes only). */
   invitePath?: string;
 }): string {
-  const path = input.invitePath ?? "PATH_TO_INVITE_JSON";
-  return [
-    `Join instructions for ${input.invite.name} (${input.invite.slug})`,
-    "",
-    "These instructions are safe to send in email. Do NOT paste the invite JSON into email; the sender will provide that file separately.",
-    "",
-    "1. Install LastDB:",
-    "   brew install edgevector/tap/lastdb",
-    "2. Install the LastDB app bundle:",
-    "   last-stack-install-apps",
-    "   If the bundle is not available yet, clone/install the org and lastsecrets apps from EdgeVector.",
-    "3. Initialize local secret storage:",
-    "   lastsecrets init",
-    "4. Initialize org schemas on your LastDB node:",
-    "   org init",
-    "5. Save the separately provided invite file on this machine, then join:",
-    `   org join --from ${path}`,
-    "6. Verify membership:",
-    `   org show ${input.invite.slug}`,
-    "",
-    "Keep the invite file private and delete it after a successful join.",
-  ].join("\n") + "\n";
+  const slug = input.invite.slug;
+  const name = input.invite.name;
+  const inviterPath = input.invitePath ?? `./org-${slug}-invite.json`;
+  const friendHint = `~/Downloads/${slug}.invite.json`;
+  return `# LastDB org invite — agent instructions
+
+You are helping a human join the LastDB organization **${name}** (\`${slug}\`).
+
+## Security (do not skip)
+
+- The inviter sends a **secret invite file** out-of-band (AirDrop, Signal,
+  1Password, USB). That file is a password — never paste its JSON into email,
+  chat, Brain, Kanban, git, or logs.
+- Ask the human for the path to the invite file **on this machine** after they
+  receive it. Inviter wrote it as: \`${inviterPath}\` (their machine; friend path
+  may be e.g. \`${friendHint}\`).
+- After a successful join, delete the invite file.
+
+## 1) Install (macOS Apple Silicon; skip steps already done)
+
+\`\`\`bash
+curl -fsSL https://bun.sh/install | bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+
+git clone https://github.com/EdgeVector/last-stack ~/.last-stack
+~/.last-stack/setup
+~/.last-stack/bin/last-stack-install-apps
+
+brew services start lastdb
+curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
+# expect: {"status":"ok"}
+\`\`\`
+
+## 2) One-time app setup
+
+\`\`\`bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+lastsecrets init
+org init
+# recommended:
+brain init --grant-consent
+kanban init
+\`\`\`
+
+## 3) Join
+
+Ask the human for the invite file path, then:
+
+\`\`\`bash
+org join --from /path/the/human/gives/you.invite.json
+org list
+org show ${slug}
+\`\`\`
+
+Delete the invite file after success.
+
+## 4) Optional shared work root
+
+If the inviter named a project folder and db slug:
+
+\`\`\`bash
+org bind ${slug} <db-slug> --root ~/path/to/project
+cd ~/path/to/project && org resolve && org kanban list
+\`\`\`
+
+## Done when
+
+- \`org show ${slug}\` succeeds
+- Invite file removed from disk
+- You never printed the invite JSON or ran \`lastsecrets get\` on org keys
+`;
 }
 
 export function buildClaimAgentInstructions(input: {
   invite: Pick<OrgInvite, "slug" | "name">;
   claim: Pick<InviteClaim, "claim_id" | "recipient_identity">;
 }): string {
-  return [
-    `Join instructions for ${input.invite.name} (${input.invite.slug})`,
-    "",
-    "These instructions are safe to send in email. They contain only a non-secret claim id; the org key is delivered over sealed Exemem messaging.",
-    "",
-    "1. Install LastDB:",
-    "   brew install edgevector/tap/lastdb",
-    "2. Install the LastDB app bundle:",
-    "   last-stack-install-apps",
-    "   If the bundle is not available yet, clone/install the org and lastsecrets apps from EdgeVector.",
-    "3. Initialize local secret storage:",
-    "   lastsecrets init",
-    "4. Initialize org schemas on your LastDB node:",
-    "   org init",
-    "5. Claim the sealed invite:",
-    `   org join --claim ${input.claim.claim_id}`,
-    "6. Verify membership:",
-    `   org show ${input.invite.slug}`,
-    "",
-    `Recipient identity: ${input.claim.recipient_identity}`,
-    "No invite JSON file or raw E2E key should be pasted into email or chat.",
-  ].join("\n") + "\n";
+  const slug = input.invite.slug;
+  const name = input.invite.name;
+  const claimId = input.claim.claim_id;
+  const recipient = input.claim.recipient_identity;
+  return `# LastDB org invite — agent instructions (sealed claim)
+
+You are helping a human join the LastDB organization **${name}** (\`${slug}\`).
+
+These instructions are safe for email/chat: they contain only a non-secret claim
+id. The org encryption key is delivered over sealed Exemem messaging — **do not**
+expect or paste invite JSON.
+
+## 1) Install (macOS Apple Silicon; skip steps already done)
+
+\`\`\`bash
+curl -fsSL https://bun.sh/install | bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+
+git clone https://github.com/EdgeVector/last-stack ~/.last-stack
+~/.last-stack/setup
+~/.last-stack/bin/last-stack-install-apps
+
+brew services start lastdb
+curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
+# expect: {"status":"ok"}
+\`\`\`
+
+## 2) One-time app setup
+
+\`\`\`bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+lastsecrets init
+org init
+brain init --grant-consent
+kanban init
+\`\`\`
+
+## 3) Claim the sealed invite
+
+Recipient identity expected: \`${recipient}\`
+
+\`\`\`bash
+org join --claim ${claimId}
+org list
+org show ${slug}
+\`\`\`
+
+If claim fails with "transport unavailable", ask the inviter to re-send using
+the secret-file path: \`org invite ${slug} --out FILE --agent\` and follow the
+file-based instructions instead.
+
+## Done when
+
+- \`org show ${slug}\` succeeds
+- No invite JSON was ever pasted into chat
+`;
 }
+

@@ -354,20 +354,26 @@ async function cmdInvite(
     return 0;
   }
 
+  // File path: --agent implies writing a secret invite file. Default path when
+  // --out is omitted so the inviter always has something concrete to transfer.
+  const outPath =
+    opts.out ??
+    (opts.agent ? pathResolve(process.cwd(), `org-${invite.slug}-invite.json`) : undefined);
+
   const body = serializeInvite(invite);
-  if (opts.out) {
-    mkdirSync(dirname(opts.out), { recursive: true, mode: 0o700 });
-    writeFileSync(opts.out, body, { encoding: "utf8", mode: 0o600 });
-    const status = `wrote invite to ${opts.out} (contains raw e2e key — treat as secret)\n`;
+  if (outPath) {
+    mkdirSync(dirname(outPath), { recursive: true, mode: 0o700 });
+    writeFileSync(outPath, body, { encoding: "utf8", mode: 0o600 });
+    const status = `wrote invite to ${outPath} (contains raw e2e key — treat as secret)\n`;
     if (opts.agent) io.stderr.write(status);
     else io.stdout.write(status);
   }
   if (opts.agent) {
-    io.stdout.write(buildAgentInstructions({ invite, invitePath: opts.out }));
-  } else if (!opts.out) {
+    io.stdout.write(buildAgentInstructions({ invite, invitePath: outPath }));
+  } else if (!outPath) {
     io.stdout.write(body);
     io.stderr.write(
-      "warning: invite printed to stdout and contains the raw e2e key; prefer --out <file>\n",
+      "warning: invite printed to stdout and contains the raw e2e key; prefer --out <file> or --agent\n",
     );
   }
   return 0;
@@ -842,11 +848,15 @@ ${usageWrapperLine()}
 
 Other:
   org list | show <slug>
-  org invite <slug> --to recipient-identity [--agent]
-  org invite <slug> --out invite.json [--agent]
-  org join --claim CLAIM_ID | --from invite.json
+  org invite <slug> --out invite.json          # secret file (transfer OOB)
+  org invite <slug> --agent [--out path]       # pasteable agent instructions + secret file
+  org invite <slug> --to identity [--agent]    # sealed claim (Exemem; when transport configured)
+  org join --from invite.json
+  org join --claim CLAIM_ID
   org schema-json
   org help
+
+Invite humans: see docs/INVITE.md
 
 Env: ${LASTDB_DB_ENV} is set when wrapping apps (and --db is injected).
 `;
