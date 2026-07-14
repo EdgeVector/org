@@ -54,15 +54,18 @@ describe("agent invite instructions", () => {
     expect(text).not.toContain("edgevector/tap/lastdb");
   });
 
-  it("claim instructions include claim id only", () => {
+  it("claim instructions include portable claim token not raw e2e", () => {
+    const portable = "org-claim-abc.SEALEDENVELOPE";
     const text = buildClaimAgentInstructions({
       invite: { slug: "friends", name: "Friends" },
       claim: {
-        claim_id: "claim-abc",
+        claim_id: "org-claim-abc",
         recipient_identity: "user-xyz",
+        sealed_blob: portable,
       },
     });
-    expect(text).toContain("org join --claim claim-abc");
+    expect(text).toContain("org join --claim");
+    expect(text).toContain(portable);
     expect(text).toContain("user-xyz");
     expect(text).toContain("last-stack-install-apps");
     expect(text).not.toContain("e2e_key");

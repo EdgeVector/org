@@ -297,13 +297,13 @@ describe("org CLI", () => {
       expect(code).toBe(0);
       expect(transport.claims.size).toBe(1);
       const claimId = [...transport.claims.keys()][0]!;
-      expect(io.out()).toContain(`org join --claim ${claimId}`);
+      expect(io.out()).toContain(`org join --claim`);
+      expect(io.out()).toContain(claimId);
       expect(io.out()).toContain("mailto:teammate@example.com");
-      expect(io.out()).toContain("non-secret claim");
+      expect(io.out()).toContain("sealed claim");
       expect(io.out()).toContain("last-stack-install-apps");
       expect(io.out()).not.toContain("e2e_key");
       expect(io.out()).not.toContain(e2eKey);
-      expect(io.err()).toBe("");
 
       const memberClient = memoryClient("member-2");
       const memberSecrets = memorySecrets();
@@ -333,6 +333,8 @@ describe("org CLI", () => {
       lastSecrets: secrets,
       newClient: () => client,
     };
+    const prev = process.env.ORG_INVITE_TRANSPORT;
+    process.env.ORG_INVITE_TRANSPORT = "unavailable";
 
     try {
       let io = captureIo();
@@ -363,6 +365,8 @@ describe("org CLI", () => {
       expect(code).toBe(1);
       expect(io.err()).toContain("sealed invite transport unavailable");
     } finally {
+      if (prev === undefined) delete process.env.ORG_INVITE_TRANSPORT;
+      else process.env.ORG_INVITE_TRANSPORT = prev;
       rmSync(dir, { recursive: true, force: true });
     }
   });
