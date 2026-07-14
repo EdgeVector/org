@@ -56,8 +56,9 @@ const config: Config = {
   nodeUrl: "http://localhost:9001",
   userHash: "u1",
   schemas: {
-    Organization: { schemaHash: "sch-org", schemaName: "org/Organization" },
-    OrgDatabase: { schemaHash: "sch-db", schemaName: "org/OrgDatabase" },
+    // Data path uses schemaName (namespaced) when present.
+    Organization: { schemaHash: "hash-org", schemaName: "org/Organization" },
+    OrgDatabase: { schemaHash: "hash-db", schemaName: "org/OrgDatabase" },
   },
 };
 

@@ -7,7 +7,21 @@ import {
   e2eKeyRef,
   organizationSchema,
   orgDatabaseSchema,
+  type SchemaKind,
 } from "./schema.ts";
+
+/**
+ * Mini's data path resolves app schemas by namespaced name (`org/Organization`),
+ * not by identity_hash alone (unlike some dual-registered hashes that also
+ * appear as `name`). Prefer schemaName for mutate/query.
+ */
+function schemaId(config: Config, kind: SchemaKind): string {
+  const binding = schemaBinding(config, kind);
+  if (binding.schemaName && binding.schemaName.includes("/")) {
+    return binding.schemaName;
+  }
+  return binding.schemaHash;
+}
 
 export type Organization = {
   slug: string;
@@ -44,9 +58,9 @@ export async function putOrganization(
   },
 ): Promise<Organization> {
   assertSlug(input.slug, "org slug");
-  const binding = schemaBinding(config, "Organization");
+  const sid = schemaId(config, "Organization");
   const existing = await client.queryByKey({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     keyHash: input.slug,
     fields: ORG_FIELDS,
   });
@@ -66,13 +80,13 @@ export async function putOrganization(
   const fields = orgToFields(record);
   if (existing) {
     await client.updateRecord({
-      schemaHash: binding.schemaHash,
+      schemaHash: sid,
       keyHash: input.slug,
       fields,
     });
   } else {
     await client.createRecord({
-      schemaHash: binding.schemaHash,
+      schemaHash: sid,
       keyHash: input.slug,
       fields,
     });
@@ -86,9 +100,9 @@ export async function getOrganization(
   slug: string,
 ): Promise<Organization> {
   assertSlug(slug, "org slug");
-  const binding = schemaBinding(config, "Organization");
+  const sid = schemaId(config, "Organization");
   const row = await client.queryByKey({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     keyHash: slug,
     fields: ORG_FIELDS,
   });
@@ -100,9 +114,9 @@ export async function listOrganizations(
   client: LastDbClient,
   config: Config,
 ): Promise<Organization[]> {
-  const binding = schemaBinding(config, "Organization");
+  const sid = schemaId(config, "Organization");
   const rows = await client.queryAll({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     fields: ORG_FIELDS,
   });
   return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
@@ -121,9 +135,9 @@ export async function putOrgDatabase(
   },
 ): Promise<OrgDatabase> {
   const id = dbId(input.orgSlug, input.dbSlug);
-  const binding = schemaBinding(config, "OrgDatabase");
+  const sid = schemaId(config, "OrgDatabase");
   const existing = await client.queryByKey({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     keyHash: id,
     fields: DB_FIELDS,
   });
@@ -143,13 +157,13 @@ export async function putOrgDatabase(
   const fields = dbToFields(record);
   if (existing) {
     await client.updateRecord({
-      schemaHash: binding.schemaHash,
+      schemaHash: sid,
       keyHash: id,
       fields,
     });
   } else {
     await client.createRecord({
-      schemaHash: binding.schemaHash,
+      schemaHash: sid,
       keyHash: id,
       fields,
     });
@@ -162,9 +176,9 @@ export async function listOrgDatabases(
   config: Config,
   orgSlug?: string,
 ): Promise<OrgDatabase[]> {
-  const binding = schemaBinding(config, "OrgDatabase");
+  const sid = schemaId(config, "OrgDatabase");
   const rows = await client.queryAll({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     fields: DB_FIELDS,
   });
   let dbs = rows.map(rowToDb);
@@ -182,9 +196,9 @@ export async function getOrgDatabase(
   dbSlug: string,
 ): Promise<OrgDatabase> {
   const id = dbId(orgSlug, dbSlug);
-  const binding = schemaBinding(config, "OrgDatabase");
+  const sid = schemaId(config, "OrgDatabase");
   const row = await client.queryByKey({
-    schemaHash: binding.schemaHash,
+    schemaHash: sid,
     keyHash: id,
     fields: DB_FIELDS,
   });

@@ -351,6 +351,19 @@ function renderedKeyToHashKey(key: string): { hash: string | null; range: string
 
 function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
   if (err instanceof TransportError) {
+    const detail = err.message ?? String(err);
+    // SDK classifies non-JSON error bodies as TransportError; those are still
+    // reachable-node protocol errors, not "socket down".
+    if (/non-JSON response|ECONNREFUSED|ENOENT|connect/i.test(detail) === false) {
+      return new OrgError("transport_error", detail, err);
+    }
+    if (/non-JSON response/i.test(detail)) {
+      return new OrgError(
+        "node_bad_response",
+        `LastDB data path error: ${detail}`,
+        err,
+      );
+    }
     return new OrgError(
       "service_unreachable",
       isLoopbackNodeUrl(nodeUrl)

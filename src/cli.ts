@@ -153,9 +153,13 @@ async function cmdCreate(
   const { client, config } = await loadSession(opts, deps);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
 
+  const orgSchemaId =
+    config.schemas.Organization.schemaName?.includes("/")
+      ? config.schemas.Organization.schemaName
+      : config.schemas.Organization.schemaHash;
   const existing = await client
     .queryByKey({
-      schemaHash: config.schemas.Organization.schemaHash,
+      schemaHash: orgSchemaId,
       keyHash: slug,
       fields: organizationSchema.schema.fields,
     })
