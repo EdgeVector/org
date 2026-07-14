@@ -292,3 +292,77 @@ If claim fails, ask the inviter to re-send with the secret-file path:
 `;
 }
 
+/**
+ * Agent instructions for the preferred clear-channel path: package is
+ * encrypted to the friend's `orgpk1:…` public key (from `org receive`).
+ * The package may be pasted over email/Slack; raw e2e_key is never present.
+ */
+export function buildPubkeySealedAgentInstructions(input: {
+  invite: Pick<OrgInvite, "slug" | "name">;
+  recipientPubkey: string;
+  recipientFingerprint: string;
+  sealedPackage: string;
+}): string {
+  const slug = input.invite.slug;
+  const name = input.invite.name;
+  const sealed = input.sealedPackage;
+  return `# LastDB org invite — agent instructions (pubkey-sealed)
+
+You are helping a human join the LastDB organization **${name}** (\`${slug}\`).
+
+These instructions do **not** contain the raw org encryption key. They contain a
+package **encrypted to this person's public key** (\`orgpk1:…\`). Only their
+local private key can open it — safe to paste over email/Slack/Signal.
+
+Recipient public key fingerprint: \`${input.recipientFingerprint}\`
+Recipient public key: \`${input.recipientPubkey}\`
+
+## 1) Install (macOS Apple Silicon; skip steps already done)
+
+\`\`\`bash
+curl -fsSL https://bun.sh/install | bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+
+git clone https://github.com/EdgeVector/last-stack ~/.last-stack
+~/.last-stack/setup
+~/.last-stack/bin/last-stack-install-apps
+
+brew services start lastdb
+curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
+# expect: {"status":"ok"}
+\`\`\`
+
+## 2) One-time app setup + show your public key (if not already done)
+
+\`\`\`bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+lastsecrets init
+org init
+org receive
+# Send the printed orgpk1:… line to the admin, then wait for the sealed package.
+\`\`\`
+
+## 3) Join with the sealed package
+
+Copy the package **exactly** (one line, starts with \`orgseal1:\`):
+
+\`\`\`
+${sealed}
+\`\`\`
+
+Then (must use the **same machine / same** \`org receive\` identity that produced the public key):
+
+\`\`\`bash
+org join --sealed '${sealed}'
+# equivalent: org receive --sealed '${sealed}'
+org list
+org show ${slug}
+\`\`\`
+
+## Done when
+
+- \`org show ${slug}\` succeeds
+- You never printed raw invite JSON or ran \`lastsecrets get\` on org keys
+`;
+}
+
