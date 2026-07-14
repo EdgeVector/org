@@ -15,7 +15,6 @@ import {
   e2eKeyRef,
   e2eSecretSlug,
   organizationSchema,
-  orgDatabaseSchema,
 } from "./schema.ts";
 import {
   formatDb,
@@ -477,9 +476,6 @@ function dbUsage(): string {
   org db show <org-slug> <db-slug>
 `;
 }
-
-// silence unused import when tree-shaken poorly
-void orgDatabaseSchema;
 
 if (import.meta.main) {
   const code = await run();
