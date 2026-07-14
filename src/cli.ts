@@ -16,13 +16,29 @@ import {
   buildAgentInstructions,
   buildClaimAgentInstructions,
   buildInvite,
+  buildPubkeySealedAgentInstructions,
   newInviteClaimId,
   parseInvite,
   serializeInvite,
 } from "./invite.ts";
+import {
+  isPubkeySealedPackage,
+  sealInviteToPubkey,
+  unsealAnyInvite,
+} from "./invite-seal.ts";
 import { newInviteTransport, type InviteTransport } from "./invite-transport.ts";
 import { defaultNodeUrl, newLastDbClient, resolveSocketPath } from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
+import {
+  defaultMemberIdentityPath,
+  formatReceiveBanner,
+  isMemberPubkey,
+  loadOrCreateMemberIdentity,
+  memberFingerprint,
+  memberPrivateKeyObject,
+  memberPubkeyLine,
+  parseMemberPubkey,
+} from "./member-identity.ts";
 import { ResolveError, resolveWriteTarget } from "./resolve.ts";
 import {
   ALL_SCHEMAS,
@@ -114,6 +130,10 @@ export async function run(
 
     if (command === "invite" && arg) {
       return await cmdInvite(arg, parseOptions(tail), io, deps);
+    }
+
+    if (command === "receive") {
+      return await cmdReceive(parseOptions([arg, ...tail].filter(Boolean) as string[]), io, deps);
     }
 
     if (command === "join") {
@@ -340,6 +360,51 @@ async function cmdInvite(
   }
 
   if (opts.to) {
+    // Preferred: encrypt-to friend orgpk1:… public key (clear-channel safe).
+    if (isMemberPubkey(opts.to)) {
+      const recipient = parseMemberPubkey(opts.to);
+      const orgPrivateKey = secrets.get(`org-${slug}-private`);
+      const sealed = sealInviteToPubkey({
+        invite,
+        recipientPubkey: recipient.encoded,
+        orgPrivateKeyB64: orgPrivateKey,
+        orgPublicKeyB64: org.orgPublicKey,
+      });
+      if (opts.outSealed) {
+        mkdirSync(dirname(opts.outSealed), { recursive: true, mode: 0o700 });
+        writeFileSync(opts.outSealed, `${sealed}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+        });
+        io.stderr.write(`wrote sealed package to ${opts.outSealed}\n`);
+      }
+      if (opts.agent) {
+        io.stdout.write(
+          buildPubkeySealedAgentInstructions({
+            invite,
+            recipientPubkey: recipient.encoded,
+            recipientFingerprint: recipient.fingerprint,
+            sealedPackage: sealed,
+          }),
+        );
+      } else {
+        io.stdout.write(`sealed org invite for fingerprint ${recipient.fingerprint}\n`);
+        io.stdout.write(`recipient=${recipient.encoded}\n`);
+        io.stdout.write(`sealed_package=${sealed}\n`);
+        io.stdout.write(
+          "friend runs: org join --sealed '<sealed_package>'  (or org receive --sealed …)\n",
+        );
+        io.stderr.write(
+          "note: package is encrypted to their public key — safe on any clear channel\n",
+        );
+      }
+      return 0;
+    }
+
+    // Legacy portable bearer token (deprecated): identity string that is not a pubkey.
+    io.stderr.write(
+      "warning: --to without orgpk1:… uses a portable bearer token (not recipient-bound). Prefer: friend runs `org receive`, then `org invite <slug> --to orgpk1:…`\n",
+    );
     const transport = deps.inviteTransport ?? newInviteTransport();
     const claim = await transport.deliver({
       recipientIdentity: opts.to,
@@ -388,20 +453,68 @@ async function cmdInvite(
   return 0;
 }
 
+async function cmdReceive(opts: Options, io: Io, deps: CliDeps): Promise<number> {
+  const idPath = opts.identityPath ?? defaultMemberIdentityPath();
+  // Accept sealed package: join path without a separate `join` verb.
+  if (opts.sealed) {
+    return await cmdJoin({ ...opts, sealed: opts.sealed }, io, deps);
+  }
+  if (opts.from) {
+    // Allow `org receive --from sealed.txt` for a file containing orgseal1:…
+    const token = readFileSync(opts.from, "utf8").trim();
+    return await cmdJoin({ ...opts, sealed: token, from: undefined }, io, deps);
+  }
+
+  const id = loadOrCreateMemberIdentity(idPath);
+  if (opts.json) {
+    io.stdout.write(
+      `${JSON.stringify(
+        {
+          public_key: memberPubkeyLine(id),
+          fingerprint: memberFingerprint(id),
+          path: idPath,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else {
+    io.stdout.write(formatReceiveBanner(id));
+  }
+  return 0;
+}
+
 async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
-  if (!opts.from && !opts.claim) {
-    throw new Error("join requires --from <invite.json> or --claim <id>");
+  const modes = [opts.from, opts.claim, opts.sealed].filter(Boolean);
+  if (modes.length === 0) {
+    throw new Error(
+      "join requires --from <invite.json>, --sealed <orgseal1:…>, or --claim <token>",
+    );
   }
-  if (opts.from && opts.claim) {
-    throw new Error("join accepts only one of --from or --claim");
+  if (modes.length > 1) {
+    throw new Error("join accepts only one of --from, --sealed, or --claim");
   }
-  const invite = opts.claim
-    ? parseInvite(
+
+  let invite;
+  if (opts.sealed) {
+    const id = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
+    invite = unsealAnyInvite(opts.sealed, memberPrivateKeyObject(id));
+  } else if (opts.claim) {
+    const token = opts.claim.trim();
+    if (isPubkeySealedPackage(token)) {
+      const id = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
+      invite = unsealAnyInvite(token, memberPrivateKeyObject(id));
+    } else {
+      invite = parseInvite(
         await (deps.inviteTransport ?? newInviteTransport()).claim({
-          claimId: opts.claim,
+          claimId: token,
         }),
-      )
-    : parseInvite(JSON.parse(readFileSync(opts.from!, "utf8")));
+      );
+    }
+  } else {
+    invite = parseInvite(JSON.parse(readFileSync(opts.from!, "utf8")));
+  }
+
   const { client, config } = await loadSession(opts, deps);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
 
@@ -706,10 +819,14 @@ type Options = {
   name?: string;
   description?: string;
   out?: string;
+  /** Optional path to write orgseal1: package when inviting with --to orgpk1:… */
+  outSealed?: string;
   agent?: boolean;
   from?: string;
   to?: string;
   claim?: string;
+  sealed?: string;
+  identityPath?: string;
   root?: string;
   cwd?: string;
   defaultDb?: string;
@@ -805,6 +922,16 @@ function parseOptions(args: string[]): Options {
       case "--claim":
         opts.claim = next();
         break;
+      case "--sealed":
+        opts.sealed = next();
+        break;
+      case "--out-sealed":
+        opts.outSealed = next();
+        break;
+      case "--identity":
+      case "--identity-path":
+        opts.identityPath = next();
+        break;
       case "--root":
         opts.root = next();
         break;
@@ -857,11 +984,14 @@ ${usageWrapperLine()}
 
 Other:
   org list | show <slug>
-  org invite <slug> --out invite.json          # secret file (transfer OOB)
+  org receive                                  # print my orgpk1:… public key (ready for invite)
+  org receive --sealed orgseal1:…              # accept pubkey-sealed package
+  org invite <slug> --to orgpk1:… [--agent]    # encrypt invite to friend pubkey (clear-channel OK)
+  org invite <slug> --out invite.json          # secret file fallback (raw e2e; transfer OOB)
   org invite <slug> --agent [--out path]       # pasteable agent instructions + secret file
-  org invite <slug> --to identity [--agent]    # sealed claim (Exemem; when transport configured)
+  org join --sealed orgseal1:…                 # join from pubkey-sealed package
   org join --from invite.json
-  org join --claim CLAIM_ID
+  org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org schema-json
   org help
 

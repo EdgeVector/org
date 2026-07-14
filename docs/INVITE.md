@@ -1,111 +1,96 @@
 # Invite a friend to your LastDB org
 
-## You (inviter) — already have LastDB
+**Preferred path:** friend installs LastDB → shows their public key → you seal
+the org key to that key → they join. The sealed package may travel on any clear
+channel (email/Slack). Friend does **not** need an Exemem account.
 
-```bash
-export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-
-# once
-lastsecrets init
-org init
-
-# create (or reuse) an org
-org create friends --name "Friends"
-
-# recommended: secret file + pasteable agent instructions
-org invite friends --agent --out ~/Desktop/friends.invite.json
-```
-
-Then:
-
-1. **Copy the text printed to stdout** into email/chat (safe — no encryption key).
-2. **Send `friends.invite.json` separately** (AirDrop, Signal, 1Password). Treat it like a password.
-3. After they join, both of you can delete the invite file.
-
-### Alternative (CLI-only friend)
-
-```bash
-org invite friends --out ~/Desktop/friends.invite.json
-# hand them the file + docs/INVITE.md “Friend” section
-```
-
-### Sealed claim (no invite JSON file)
-
-```bash
-org invite friends --to mailto:friend@example.com --agent
-```
-
-Prints pasteable agent instructions that include a **portable sealed claim
-token** (not the raw e2e key). Friend (or their agent) runs:
-
-```bash
-org join --claim '<paste-token-exactly>'
-```
-
-The token is a secret bearer — send only to the intended person (email/Signal
-OK; do not post publicly). Cryptography is AES-256-GCM; Exemem messaging can
-replace the transport later without changing this CLI.
+Only the org admin needs Exemem for cloud-admin features. Identity for invite is
+just a **public key** (`orgpk1:…`).
 
 ---
 
-## Friend (invitee)
+## Handshake (both need LastDB + org)
+
+### 1) You → friend: public install link
+
+```text
+Install LastDB + apps (includes org):
+  see https://thelastdb.com/llms.txt  or  last-stack-install-apps
+No Exemem account needed.
+```
+
+### 2) Friend: ready for invite
 
 ```bash
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-
-# full cold install
-curl -fsSL https://bun.sh/install | bash
-git clone https://github.com/EdgeVector/last-stack ~/.last-stack
-~/.last-stack/setup
-~/.last-stack/bin/last-stack-install-apps
-brew services start lastdb
-
 lastsecrets init
 org init
+org receive
+```
 
-# after you receive the invite file
-org join --from ~/Downloads/friends.invite.json
-org list
+Friend copies the `orgpk1:…` line (and optional fingerprint) back to you.
+
+### 3) You: seal to their public key
+
+```bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+# once: lastsecrets init && org init && org create friends --name "Friends"
+
+org invite friends --to 'orgpk1:PASTE_THEIR_KEY' --agent
+```
+
+Copy the printed agent text / `orgseal1:…` package to the friend over any channel.
+
+### 4) Friend: join
+
+```bash
+org join --sealed 'orgseal1:PASTE_PACKAGE'
+# or: org receive --sealed 'orgseal1:…'
 org show friends
-
-# delete the invite file
-rm ~/Downloads/friends.invite.json
 ```
 
-Optional shared project root (if inviter told you a db name):
-
-```bash
-org bind friends company --root ~/code/shared-project
-cd ~/code/shared-project
-org kanban list
-```
+Must use the **same machine** that ran `org receive` (same local private key).
 
 ---
 
-## What works today vs not yet
+## Fallback: secret invite file
 
-| Works | Not yet (post–1.0 multiplayer) |
-|-------|--------------------------------|
-| Create org + LastSecrets keys | Multi-writer cloud sync of org data |
-| Secret-file invite + join | Always-on Exemem sealed invite |
-| Pasteable `--agent` instructions | Browser one-click join |
-| Folder bind + `org kanban …` | Full product membership UI / revoke |
+When you cannot do the pubkey handshake (AirGap USB, etc.):
+
+```bash
+org invite friends --out ~/Desktop/friends.invite.json --agent
+# hand the file OOB — it contains the raw e2e key
+# friend:
+org join --from ~/Downloads/friends.invite.json
+```
+
+Never paste invite JSON into email/chat.
+
+---
+
+## Legacy: portable bearer `--claim`
+
+`org invite --to mailto:…` still issues a portable token (AES envelope with
+embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 
 ---
 
 ## Security
 
-- Never paste invite JSON into email, Slack, Brain, or Kanban.
-- Prefer `--out` (mode `0600`) over printing the invite to stdout.
-- Agents must not run `lastsecrets get` on org keys unless the human explicitly
-  asks for a recovery workflow.
+| On the wire | OK? |
+|-------------|-----|
+| Install link | Yes |
+| Friend `orgpk1:…` public key | Yes |
+| `orgseal1:…` package | Yes (encrypted to friend) |
+| Raw org E2E key / invite JSON | **No** |
+
+- Kick someone: **rotate** the org E2E key and re-invite remaining pubkeys
+  (shared-secret model — deleting a name does nothing if they still have the key).
+- Names/People mapping is out of band (or a future People app), not required here.
 
 ## Dogfood (developers)
 
-Isolated inviter → friend join (two throwaway `lastdbd` homes, primary node untouched):
-
 ```bash
-# from org checkout; lastsecrets source next door or set LS_CLI=
 LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
   scripts/invite-e2e-dogfood.sh
 # expect: VERDICT: GREEN

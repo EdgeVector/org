@@ -46,36 +46,31 @@ org db create edgevector company --name "Company DB" \
 org list
 org show edgevector
 
-# hand off to a teammate by sealed messaging claim
-org invite edgevector --to mailto:teammate@example.com --agent
-# teammate:
-org join --claim org-claim-...
+# Friend installs LastDB, then:
+#   org receive                    → sends you orgpk1:…
+# You seal to their public key (clear-channel safe):
+org invite edgevector --to 'orgpk1:…' --agent
+# Friend:
+org join --sealed 'orgseal1:…'
 ```
 
 ## Invite a person
 
-Preferred path: send a non-secret claim instruction and let Exemem messaging
-carry the sealed org key.
+**Preferred:** pubkey handshake (no Exemem account for the friend).
 
-1. Deliver the sealed invite and copy the printed agent instructions:
-   ```sh
-   org invite edgevector --to mailto:teammate@example.com --agent
-   ```
-2. Send only the printed instructions by email or chat. They contain only the
-   claim id and setup commands.
-3. The recipient follows the instructions, runs `org join --claim CLAIM_ID`,
-   and verifies with `org show edgevector`.
+1. Friend installs LastDB + org, runs `org receive`, pastes `orgpk1:…` to you.
+2. You run `org invite <slug> --to 'orgpk1:…' --agent` and paste the
+   `orgseal1:…` package back (email/Slack OK — encrypted to their key).
+3. Friend runs `org join --sealed 'orgseal1:…'` (same machine as `org receive`).
 
-Fallback when messaging is not available: create a sensitive invite file and
-move it out of band.
+Fallback: secret invite file (raw E2E key — transfer out of band only):
 
 ```sh
 org invite edgevector --out /tmp/edgevector.invite.json --agent
 org join --from /tmp/edgevector.invite.json
 ```
 
-The fallback file embeds the raw E2E key. Treat it like a password, never paste
-its contents into email or chat, and delete it after joining.
+Full write-up: [docs/INVITE.md](docs/INVITE.md).
 
 ## Commands
 
@@ -84,10 +79,12 @@ its contents into email or chat, and delete it after joining.
 | `org init` | Declare org schemas (Organization, OrgDatabase, PathBinding) |
 | `org create <slug>` | New org + LastSecrets E2E/private keys |
 | `org list` / `org show <slug>` | Metadata only (no raw keys) |
-| `org invite <slug> --to IDENTITY [--agent]` | Deliver a sealed invite claim via Exemem messaging |
+| `org receive` | Print local `orgpk1:…` public key (ready for invite) |
+| `org invite <slug> --to orgpk1:… [--agent]` | Encrypt invite to friend pubkey (clear-channel OK) |
 | `org invite <slug> --out FILE [--agent]` | Secret-file fallback plus optional safe recipient instructions |
-| `org join --claim ID` | Claim sealed invite; store E2E key via LastSecrets |
+| `org join --sealed orgseal1:…` | Decrypt pubkey-sealed package; store E2E via LastSecrets |
 | `org join --from FILE` | Import fallback invite file; store E2E key via LastSecrets |
+| `org join --claim TOKEN` | Legacy portable bearer claim |
 | `org db create/list/show` | Named shared DBs under an org |
 | `org bind <org> <db> --root PATH` | Place work under this tree → that DB |
 | `org resolve` | Print `lastdb://…` for cwd (or `--cwd` / `--db`) |

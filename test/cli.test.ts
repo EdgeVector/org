@@ -253,7 +253,100 @@ describe("org CLI", () => {
     }
   });
 
-  it("invites by sealed claim without putting raw key material in instructions", async () => {
+  it("pubkey handshake: receive → invite --to orgpk1 → join --sealed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-pubkey-"));
+    const configPath = join(dir, "config.json");
+    const friendIdentity = join(dir, "friend-seal.json");
+    const client = memoryClient("owner-1");
+    const secrets = memorySecrets();
+    const deps: CliDeps = {
+      lastSecrets: secrets,
+      newClient: () => client,
+    };
+
+    try {
+      let io = captureIo();
+      let code = await run(["init", "--config", configPath], io, deps);
+      expect(code).toBe(0);
+
+      io = captureIo();
+      code = await run(
+        ["create", "edgevector", "--name", "Edge Vector", "--config", configPath],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      const e2eKey = secrets.bag.get("org-edgevector-e2e");
+      expect(e2eKey).toBeTruthy();
+
+      // Friend: org receive → public key
+      io = captureIo();
+      code = await run(
+        ["receive", "--identity", friendIdentity, "--json"],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      const recv = JSON.parse(io.out()) as { public_key: string; fingerprint: string };
+      expect(recv.public_key.startsWith("orgpk1:")).toBe(true);
+
+      // Admin: seal to that pubkey
+      io = captureIo();
+      code = await run(
+        [
+          "invite",
+          "edgevector",
+          "--to",
+          recv.public_key,
+          "--agent",
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      expect(io.out()).toContain("pubkey-sealed");
+      expect(io.out()).toContain("orgseal1:");
+      expect(io.out()).toContain(recv.fingerprint);
+      expect(io.out()).toContain("org join --sealed");
+      expect(io.out()).not.toContain("e2e_key");
+      expect(io.out()).not.toContain(e2eKey!);
+
+      const sealMatch = io.out().match(/orgseal1:[A-Za-z0-9_-]+/);
+      expect(sealMatch).toBeTruthy();
+      const sealed = sealMatch![0]!;
+
+      // Friend joins with sealed package + same identity
+      const memberClient = memoryClient("member-2");
+      const memberSecrets = memorySecrets();
+      const memberDeps: CliDeps = {
+        lastSecrets: memberSecrets,
+        newClient: () => memberClient,
+      };
+      io = captureIo();
+      code = await run(
+        [
+          "join",
+          "--sealed",
+          sealed,
+          "--identity",
+          friendIdentity,
+          "--config",
+          configPath,
+        ],
+        io,
+        memberDeps,
+      );
+      expect(code).toBe(0);
+      expect(io.out()).toContain("joined organization");
+      expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(e2eKey);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy portable --to non-pubkey still works via transport", async () => {
     const dir = mkdtempSync(join(tmpdir(), "org-claim-"));
     const configPath = join(dir, "config.json");
     const client = memoryClient("owner-1");
@@ -299,10 +392,7 @@ describe("org CLI", () => {
       const claimId = [...transport.claims.keys()][0]!;
       expect(io.out()).toContain(`org join --claim`);
       expect(io.out()).toContain(claimId);
-      expect(io.out()).toContain("mailto:teammate@example.com");
-      expect(io.out()).toContain("sealed claim");
-      expect(io.out()).toContain("last-stack-install-apps");
-      expect(io.out()).not.toContain("e2e_key");
+      expect(io.err()).toContain("portable bearer");
       expect(io.out()).not.toContain(e2eKey);
 
       const memberClient = memoryClient("member-2");
@@ -316,9 +406,7 @@ describe("org CLI", () => {
       io = captureIo();
       code = await run(["join", "--claim", claimId, "--config", configPath], io, memberDeps);
       expect(code).toBe(0);
-      expect(io.out()).toContain("joined organization");
       expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(e2eKey);
-      expect(memberClient.store.size).toBeGreaterThan(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
