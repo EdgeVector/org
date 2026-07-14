@@ -91,3 +91,14 @@ org kanban list
 - Prefer `--out` (mode `0600`) over printing the invite to stdout.
 - Agents must not run `lastsecrets get` on org keys unless the human explicitly
   asks for a recovery workflow.
+
+## Dogfood (developers)
+
+Isolated inviter → friend join (two throwaway `lastdbd` homes, primary node untouched):
+
+```bash
+# from org checkout; lastsecrets source next door or set LS_CLI=
+LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
+  scripts/invite-e2e-dogfood.sh
+# expect: VERDICT: GREEN
+```
