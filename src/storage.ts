@@ -94,19 +94,13 @@ export async function putOrganization(
     updatedAt: now,
   };
   const fields = orgToFields(record);
-  if (existing) {
-    await client.updateRecord({
-      schemaHash: sid,
-      keyHash: input.slug,
-      fields,
-    });
-  } else {
-    await client.createRecord({
-      schemaHash: sid,
-      keyHash: input.slug,
-      fields,
-    });
-  }
+  await writeRecordWithLegacyFallback(client, {
+    schemaHash: sid,
+    keyHash: input.slug,
+    fields,
+    legacyFields: withoutKeys(fields, ["default_db"]),
+    update: Boolean(existing),
+  });
   return record;
 }
 
@@ -406,6 +400,44 @@ function rowToDb(row: QueryRow): OrgDatabase {
     createdAt: str(f.created_at),
     updatedAt: str(f.updated_at),
   };
+}
+
+async function writeRecordWithLegacyFallback(
+  client: LastDbClient,
+  opts: {
+    schemaHash: string;
+    keyHash: string;
+    fields: Record<string, unknown>;
+    legacyFields: Record<string, unknown>;
+    update: boolean;
+  },
+): Promise<void> {
+  const write = (fields: Record<string, unknown>) =>
+    opts.update
+      ? client.updateRecord({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, fields })
+      : client.createRecord({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, fields });
+  try {
+    await write(opts.fields);
+  } catch (err) {
+    if (!isUnknownFieldsError(err)) throw err;
+    await write(opts.legacyFields);
+  }
+}
+
+function withoutKeys(
+  fields: Record<string, unknown>,
+  keys: string[],
+): Record<string, unknown> {
+  const copy = { ...fields };
+  for (const key of keys) {
+    delete copy[key];
+  }
+  return copy;
+}
+
+function isUnknownFieldsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("unknown_fields");
 }
 
 function str(value: unknown): string {
