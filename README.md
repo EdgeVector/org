@@ -55,12 +55,37 @@ org join --from /tmp/edgevector.invite.json
 
 | Command | Purpose |
 |---------|---------|
-| `org init` | Declare `org/Organization` + `org/OrgDatabase` on the local node |
+| `org init` | Declare org schemas (Organization, OrgDatabase, PathBinding) |
 | `org create <slug>` | New org + LastSecrets E2E/private keys |
 | `org list` / `org show <slug>` | Metadata only (no raw keys) |
 | `org invite <slug> --out FILE` | One-time join bundle (sensitive) |
 | `org join --from FILE` | Import invite; store E2E key via LastSecrets |
 | `org db create/list/show` | Named shared DBs under an org |
+| `org bind <org> <db> --root PATH` | Place work under this tree → that DB |
+| `org resolve` | Print `lastdb://…` for cwd (or `--cwd` / `--db`) |
+| `org use` / `unuse` / `current` | Session pin override |
+| `org kanban …` / `org run <app> …` | **Wrapper:** resolve DB, then run app with `--db` + `LASTDB_DB` |
+
+## Context wrapper (the day-to-day path)
+
+Apps take an **explicit DB handle**. Org **fills it in** from place (folder
+roots) or pin, then execs the app:
+
+```sh
+org bind edgevector company --root ~/code/edgevector
+
+cd ~/code/edgevector/fold
+org resolve                    # → lastdb://org/edgevector/company
+org kanban list                # injects --db + LASTDB_DB
+org kanban add my-card --title "…"
+org --db personal brain ask "…"   # force personal
+```
+
+Resolution order: **explicit `--db` → cwd under a bound root (longest
+prefix) → session pin → personal**. Same pure algorithm is SDK-shaped (no
+SDK→org dependency); org owns the path registry.
+
+Design: brain `design-org-context-resolve-from-cwd`.
 
 ## Security notes
 

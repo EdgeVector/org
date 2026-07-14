@@ -16,7 +16,10 @@ export type Config = {
   nodeUrl: string;
   userHash: string;
   nodeSocketPath?: string;
-  schemas: Record<SchemaKind, SchemaBinding>;
+  schemas: Partial<Record<SchemaKind, SchemaBinding>> & {
+    Organization: SchemaBinding;
+    OrgDatabase: SchemaBinding;
+  };
 };
 
 export class ConfigError extends Error {
@@ -64,13 +67,13 @@ export function writeConfig(config: Config, path = defaultConfigPath()): void {
 
 export function schemaBinding(config: Config, kind: SchemaKind): SchemaBinding {
   const binding = config.schemas[kind];
-  if (!binding?.schemaHash) {
+  if (!binding?.schemaHash && !binding?.schemaName) {
     throw new ConfigError(
       "config_invalid",
       `Config is missing schema binding for ${kind}. Re-run \`org init\`.`,
     );
   }
-  return binding;
+  return binding!;
 }
 
 function assertConfigShape(path: string, raw: unknown): Config {
@@ -93,9 +96,13 @@ function assertConfigShape(path: string, raw: unknown): Config {
     );
   }
   const schemasRaw = r.schemas as Record<string, unknown>;
-  const schemas = {} as Record<SchemaKind, SchemaBinding>;
-  for (const kind of ["Organization", "OrgDatabase"] as const) {
+  const schemas = {} as Config["schemas"];
+  for (const kind of ["Organization", "OrgDatabase", "PathBinding"] as const) {
     const entry = schemasRaw[kind];
+    if (kind === "PathBinding" && (entry === undefined || entry === null)) {
+      // Optional until re-init; bind will ask to re-run org init.
+      continue;
+    }
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       throw new ConfigError(
         "config_invalid",

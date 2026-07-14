@@ -71,6 +71,7 @@ describe("org storage", () => {
       orgHash: "abc123",
       orgPublicKey: "pub",
       role: "owner",
+      defaultDb: "company",
       createdBy: "u1",
     });
     expect(org.e2eKeyRef).toBe("lastsecrets://org-edgevector-e2e");

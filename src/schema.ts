@@ -46,6 +46,7 @@ export const organizationSchema: AddSchemaRequest = {
       "org_public_key",
       "e2e_key_ref",
       "role",
+      "default_db",
       "created_by",
       "created_at",
       "updated_at",
@@ -57,6 +58,7 @@ export const organizationSchema: AddSchemaRequest = {
       org_public_key: "String",
       e2e_key_ref: "String",
       role: "String",
+      default_db: "String",
       created_by: "String",
       created_at: "String",
       updated_at: "String",
@@ -68,6 +70,7 @@ export const organizationSchema: AddSchemaRequest = {
       org_public_key: "base64 Ed25519 public key for the organization",
       e2e_key_ref: "lastsecrets:// locator for the shared org E2E key (never the raw key)",
       role: "local role for this node: owner | admin | member",
+      default_db: "default named db slug when resolving lastdb://org/<slug> without a db segment",
       created_by: "user_hash of the creator on this node",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
@@ -76,6 +79,7 @@ export const organizationSchema: AddSchemaRequest = {
       name: ["word"],
       org_hash: ["word"],
       role: ["word"],
+      default_db: ["word"],
       e2e_key_ref: ["no_index"],
     },
     field_data_classifications: {
@@ -85,6 +89,7 @@ export const organizationSchema: AddSchemaRequest = {
       org_public_key: PUBLIC,
       e2e_key_ref: { sensitivity_level: 2, data_domain: "secret" },
       role: PUBLIC,
+      default_db: PUBLIC,
       created_by: PUBLIC,
       created_at: PUBLIC,
       updated_at: PUBLIC,
@@ -161,9 +166,72 @@ export const orgDatabaseSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
-export const ALL_SCHEMAS: AddSchemaRequest[] = [organizationSchema, orgDatabaseSchema];
+/**
+ * Path root → org/db binding for place-based resolve (cwd under root ⇒ this DB).
+ * Keyed by a stable hash of the absolute root path.
+ */
+export const pathBindingSchema: AddSchemaRequest = {
+  schema: {
+    name: "PathBinding",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Path Binding",
+    purpose_statement:
+      "Maps a filesystem root to an org named database for write-target resolution",
+    schema_type: "Hash",
+    key: { hash_field: "binding_id" },
+    fields: [
+      "binding_id",
+      "root",
+      "org_slug",
+      "db_slug",
+      "org_hash",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      binding_id: "String",
+      root: "String",
+      org_slug: "String",
+      db_slug: "String",
+      org_hash: "String",
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      binding_id: "stable id (sha256 of normalized absolute root)",
+      root: "absolute filesystem path that places work in this org db",
+      org_slug: "organization slug",
+      db_slug: "named database under the org",
+      org_hash: "org identity hash for routing",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {
+      root: ["word"],
+      org_slug: ["word"],
+      db_slug: ["word"],
+      org_hash: ["word"],
+    },
+    field_data_classifications: {
+      binding_id: PUBLIC,
+      root: PUBLIC,
+      org_slug: PUBLIC,
+      db_slug: PUBLIC,
+      org_hash: PUBLIC,
+      created_at: PUBLIC,
+      updated_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
 
-export type SchemaKind = "Organization" | "OrgDatabase";
+export const ALL_SCHEMAS: AddSchemaRequest[] = [
+  organizationSchema,
+  orgDatabaseSchema,
+  pathBindingSchema,
+];
+
+export type SchemaKind = "Organization" | "OrgDatabase" | "PathBinding";
 
 export function assertSlug(slug: string, label = "slug"): string {
   if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(slug)) {

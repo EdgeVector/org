@@ -1,12 +1,17 @@
+import { createHash } from "node:crypto";
+
 import type { Config } from "./config.ts";
 import { schemaBinding } from "./config.ts";
 import type { LastDbClient, QueryRow } from "./lastdb.ts";
+import type { PathBinding } from "./resolve.ts";
+import { normalizePath } from "./resolve.ts";
 import {
   assertSlug,
   dbId,
   e2eKeyRef,
   organizationSchema,
   orgDatabaseSchema,
+  pathBindingSchema,
   type SchemaKind,
 } from "./schema.ts";
 
@@ -30,7 +35,14 @@ export type Organization = {
   orgPublicKey: string;
   e2eKeyRef: string;
   role: string;
+  defaultDb: string;
   createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StoredPathBinding = PathBinding & {
+  bindingId: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,12 +61,14 @@ export type OrgDatabase = {
 
 const ORG_FIELDS = organizationSchema.schema.fields.slice();
 const DB_FIELDS = orgDatabaseSchema.schema.fields.slice();
+const BIND_FIELDS = pathBindingSchema.schema.fields.slice();
 
 export async function putOrganization(
   client: LastDbClient,
   config: Config,
-  input: Omit<Organization, "createdAt" | "updatedAt" | "e2eKeyRef"> & {
+  input: Omit<Organization, "createdAt" | "updatedAt" | "e2eKeyRef" | "defaultDb"> & {
     e2eKeyRef?: string;
+    defaultDb?: string;
   },
 ): Promise<Organization> {
   assertSlug(input.slug, "org slug");
@@ -65,7 +79,8 @@ export async function putOrganization(
     fields: ORG_FIELDS,
   });
   const now = new Date().toISOString();
-  const createdAt = existing ? rowToOrg(existing).createdAt : now;
+  const prev = existing ? rowToOrg(existing) : null;
+  const createdAt = prev?.createdAt ?? now;
   const record: Organization = {
     slug: input.slug,
     name: input.name,
@@ -73,6 +88,7 @@ export async function putOrganization(
     orgPublicKey: input.orgPublicKey,
     e2eKeyRef: input.e2eKeyRef ?? e2eKeyRef(input.slug),
     role: input.role,
+    defaultDb: input.defaultDb ?? prev?.defaultDb ?? "",
     createdBy: input.createdBy,
     createdAt,
     updatedAt: now,
@@ -206,6 +222,119 @@ export async function getOrgDatabase(
   return rowToDb(row);
 }
 
+export function bindingIdForRoot(root: string): string {
+  return createHash("sha256").update(normalizePath(root)).digest("hex");
+}
+
+export async function putPathBinding(
+  client: LastDbClient,
+  config: Config,
+  input: {
+    root: string;
+    orgSlug: string;
+    dbSlug: string;
+    orgHash: string;
+  },
+): Promise<StoredPathBinding> {
+  assertSlug(input.orgSlug, "org slug");
+  assertSlug(input.dbSlug, "db slug");
+  const root = normalizePath(input.root);
+  const bindingId = bindingIdForRoot(root);
+  const sid = schemaId(config, "PathBinding");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: bindingId,
+    fields: BIND_FIELDS,
+  });
+  const now = new Date().toISOString();
+  const createdAt = existing ? rowToBinding(existing).createdAt : now;
+  const record: StoredPathBinding = {
+    bindingId,
+    root,
+    orgSlug: input.orgSlug,
+    dbSlug: input.dbSlug,
+    orgHash: input.orgHash,
+    createdAt,
+    updatedAt: now,
+  };
+  const fields = {
+    binding_id: record.bindingId,
+    root: record.root,
+    org_slug: record.orgSlug,
+    db_slug: record.dbSlug,
+    org_hash: record.orgHash,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+  };
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: bindingId, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: bindingId, fields });
+  }
+  return record;
+}
+
+export async function listPathBindings(
+  client: LastDbClient,
+  config: Config,
+): Promise<StoredPathBinding[]> {
+  if (!config.schemas.PathBinding?.schemaHash && !config.schemas.PathBinding?.schemaName) {
+    return [];
+  }
+  try {
+    const sid = schemaId(config, "PathBinding");
+    const rows = await client.queryAll({ schemaHash: sid, fields: BIND_FIELDS });
+    return rows.map(rowToBinding).sort((a, b) => a.root.localeCompare(b.root));
+  } catch {
+    return [];
+  }
+}
+
+export async function removePathBinding(
+  client: LastDbClient,
+  config: Config,
+  root: string,
+): Promise<boolean> {
+  const bindingId = bindingIdForRoot(root);
+  const sid = schemaId(config, "PathBinding");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: bindingId,
+    fields: BIND_FIELDS,
+  });
+  if (!existing) return false;
+  // Soft-delete: overwrite with empty org markers is not ideal; Mini may lack
+  // delete. Tombstone by updating db_slug to empty is worse. For v1 we only
+  // support list+put; unbind removes by writing a sentinel or we document
+  // re-bind. Prefer createRecord overwrite with deleted flag if we add field.
+  // Use update to clear org_slug so resolve skips empty bindings.
+  await client.updateRecord({
+    schemaHash: sid,
+    keyHash: bindingId,
+    fields: {
+      binding_id: bindingId,
+      root: normalizePath(root),
+      org_slug: "",
+      db_slug: "",
+      org_hash: "",
+      created_at: rowToBinding(existing).createdAt,
+      updated_at: new Date().toISOString(),
+    },
+  });
+  return true;
+}
+
+export function toResolveBindings(stored: StoredPathBinding[]): PathBinding[] {
+  return stored
+    .filter((b) => b.orgSlug.length > 0 && b.dbSlug.length > 0)
+    .map((b) => ({
+      root: b.root,
+      orgSlug: b.orgSlug,
+      dbSlug: b.dbSlug,
+      orgHash: b.orgHash || undefined,
+    }));
+}
+
 function orgToFields(org: Organization): Record<string, unknown> {
   return {
     slug: org.slug,
@@ -214,6 +343,7 @@ function orgToFields(org: Organization): Record<string, unknown> {
     org_public_key: org.orgPublicKey,
     e2e_key_ref: org.e2eKeyRef,
     role: org.role,
+    default_db: org.defaultDb,
     created_by: org.createdBy,
     created_at: org.createdAt,
     updated_at: org.updatedAt,
@@ -243,7 +373,21 @@ function rowToOrg(row: QueryRow): Organization {
     orgPublicKey: str(f.org_public_key),
     e2eKeyRef: str(f.e2e_key_ref),
     role: str(f.role),
+    defaultDb: str(f.default_db),
     createdBy: str(f.created_by),
+    createdAt: str(f.created_at),
+    updatedAt: str(f.updated_at),
+  };
+}
+
+function rowToBinding(row: QueryRow): StoredPathBinding {
+  const f = row.fields;
+  return {
+    bindingId: str(f.binding_id),
+    root: str(f.root),
+    orgSlug: str(f.org_slug),
+    dbSlug: str(f.db_slug),
+    orgHash: str(f.org_hash),
     createdAt: str(f.created_at),
     updatedAt: str(f.updated_at),
   };
@@ -274,10 +418,13 @@ export function formatOrg(org: Organization): string {
     `name=${JSON.stringify(org.name)}`,
     `org_hash=${org.orgHash}`,
     `role=${org.role}`,
+    org.defaultDb ? `default_db=${org.defaultDb}` : "",
     `e2e_key_ref=${org.e2eKeyRef}`,
     `created_by=${org.createdBy}`,
     `created_at=${org.createdAt}`,
-  ].join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function formatDb(db: OrgDatabase): string {

@@ -103,7 +103,8 @@ describe("org CLI", () => {
     const code = await run(["help"], io);
     expect(code).toBe(0);
     expect(io.out()).toContain("org create");
-    expect(io.out()).toContain("lastsecrets");
+    expect(io.out()).toContain("org kanban");
+    expect(io.out()).toContain("LastSecrets");
   });
 
   it("init → create → db create → invite → join (in-memory)", async () => {
@@ -121,7 +122,7 @@ describe("org CLI", () => {
       let io = captureIo();
       let code = await run(["init", "--config", configPath], io, deps);
       expect(code).toBe(0);
-      expect(client.declared).toEqual(["Organization", "OrgDatabase"]);
+      expect(client.declared).toEqual(["Organization", "OrgDatabase", "PathBinding"]);
       expect(io.out()).toContain("initialized org config");
 
       io = captureIo();
