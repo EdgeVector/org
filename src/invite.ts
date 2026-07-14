@@ -97,8 +97,12 @@ export type InviteClaim = {
   org_hash: string;
   inviter_identity: string;
   recipient_identity: string;
-  transport: "exemem";
-  /** Opaque sealed payload handle or ciphertext produced by the transport. */
+  /** Transport label: portable sealed token today; "exemem" reserved for cloud messaging. */
+  transport: "exemem" | "portable";
+  /**
+   * Opaque sealed payload. For the portable transport this is the full
+   * `org-claim-<uuid>.<base64url-envelope>` token for `org join --claim`.
+   */
   sealed_blob: string;
   issued_at: string;
 };
@@ -130,7 +134,7 @@ export function buildInviteClaim(input: {
     org_hash: input.invite.org_hash,
     inviter_identity: input.invite.created_by,
     recipient_identity: input.recipientIdentity,
-    transport: "exemem",
+    transport: "portable",
     sealed_blob: input.sealedBlob,
     issued_at: new Date().toISOString(),
   };
@@ -216,19 +220,25 @@ cd ~/path/to/project && org resolve && org kanban list
 
 export function buildClaimAgentInstructions(input: {
   invite: Pick<OrgInvite, "slug" | "name">;
-  claim: Pick<InviteClaim, "claim_id" | "recipient_identity">;
+  claim: Pick<InviteClaim, "claim_id" | "recipient_identity" | "sealed_blob">;
 }): string {
   const slug = input.invite.slug;
   const name = input.invite.name;
-  const claimId = input.claim.claim_id;
   const recipient = input.claim.recipient_identity;
+  // Prefer the full portable token (claim_id.envelope) so join works offline.
+  const claimToken = input.claim.sealed_blob.startsWith("org-claim-")
+    ? input.claim.sealed_blob
+    : input.claim.claim_id;
   return `# LastDB org invite — agent instructions (sealed claim)
 
 You are helping a human join the LastDB organization **${name}** (\`${slug}\`).
 
-These instructions are safe for email/chat: they contain only a non-secret claim
-id. The org encryption key is delivered over sealed Exemem messaging — **do not**
-expect or paste invite JSON.
+These instructions do **not** contain the raw org encryption key. They contain a
+**portable sealed claim token** — treat that token like a one-time password
+(Signal/email to the right person is OK; do not post publicly). Prefer sealed
+claim over a \`.invite.json\` file when the inviter used \`--to\`.
+
+Recipient identity hint: \`${recipient}\`
 
 ## 1) Install (macOS Apple Silicon; skip steps already done)
 
@@ -257,22 +267,28 @@ kanban init
 
 ## 3) Claim the sealed invite
 
-Recipient identity expected: \`${recipient}\`
+Copy the claim token **exactly** (one line):
+
+\`\`\`
+${claimToken}
+\`\`\`
+
+Then:
 
 \`\`\`bash
-org join --claim ${claimId}
+org join --claim '${claimToken}'
 org list
 org show ${slug}
 \`\`\`
 
-If claim fails with "transport unavailable", ask the inviter to re-send using
-the secret-file path: \`org invite ${slug} --out FILE --agent\` and follow the
-file-based instructions instead.
+If claim fails, ask the inviter to re-send with the secret-file path:
+\`org invite ${slug} --out FILE --agent\`.
 
 ## Done when
 
 - \`org show ${slug}\` succeeds
-- No invite JSON was ever pasted into chat
+- You never printed raw invite JSON or e2e keys
+- Prefer deleting this message from shared logs after join
 `;
 }
 

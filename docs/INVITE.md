@@ -29,14 +29,22 @@ org invite friends --out ~/Desktop/friends.invite.json
 # hand them the file + docs/INVITE.md “Friend” section
 ```
 
-### Future (no secret file)
+### Sealed claim (no invite JSON file)
 
 ```bash
-org invite friends --to <their-exemem-identity> --agent
+org invite friends --to mailto:friend@example.com --agent
 ```
 
-Requires Exemem sealed-messaging transport. Today this fails closed with a clear
-error unless a transport is configured; use `--out` / `--agent` file path.
+Prints pasteable agent instructions that include a **portable sealed claim
+token** (not the raw e2e key). Friend (or their agent) runs:
+
+```bash
+org join --claim '<paste-token-exactly>'
+```
+
+The token is a secret bearer — send only to the intended person (email/Signal
+OK; do not post publicly). Cryptography is AES-256-GCM; Exemem messaging can
+replace the transport later without changing this CLI.
 
 ---
 

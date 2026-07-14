@@ -349,7 +349,16 @@ async function cmdInvite(
     if (opts.agent) {
       io.stdout.write(buildClaimAgentInstructions({ invite, claim }));
     } else {
-      io.stdout.write(`delivered sealed org invite claim ${claim.claim_id} to ${opts.to}\n`);
+      const token = claim.sealed_blob.startsWith("org-claim-")
+        ? claim.sealed_blob
+        : claim.claim_id;
+      io.stdout.write(`delivered sealed org invite for ${opts.to}\n`);
+      io.stdout.write(`claim_id=${claim.claim_id}\n`);
+      io.stdout.write(`claim_token=${token}\n`);
+      io.stdout.write(`friend runs: org join --claim '<claim_token>'\n`);
+      io.stderr.write(
+        "warning: claim_token is a secret bearer — send only to the intended recipient\n",
+      );
     }
     return 0;
   }
