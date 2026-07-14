@@ -55,7 +55,6 @@ async function udsJson(
   }
   const res = await fetch(`http://localhost${path}`, {
     method,
-    // @ts-expect-error Bun supports unix sockets on Request
     unix: socketPath,
     headers: {
       Host: "localhost",
@@ -63,7 +62,7 @@ async function udsJson(
       Accept: "application/json",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  } as RequestInit & { unix: string });
   const text = await res.text();
   let json: unknown = null;
   try {
