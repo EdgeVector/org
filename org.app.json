@@ -1,0 +1,5 @@
+{
+  "display_name": "org",
+  "description": "Create shared organization databases that cohabit the user's LastDB node. Org E2E keys are stored via LastSecrets (lastsecrets://org-<slug>-e2e); metadata and named DBs live as org/* schemas on the same Mini node.",
+  "homepage_url": "lastdb:///org"
+}
