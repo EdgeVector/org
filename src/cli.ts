@@ -68,6 +68,11 @@ import {
   removePathBinding,
   toResolveBindings,
 } from "./storage.ts";
+import {
+  listOrgCloudSyncTargets,
+  registerOrgCloudSync,
+  type OrgSyncRegisterResult,
+} from "./org-sync.ts";
 import { isMetaCommand, usageWrapperLine, wrapApp } from "./wrapper.ts";
 
 type Io = {
@@ -138,6 +143,10 @@ export async function run(
 
     if (command === "join") {
       return await cmdJoin(parseOptions([arg, ...tail].filter(Boolean) as string[]), io, deps);
+    }
+
+    if (command === "sync") {
+      return await cmdSync(arg, tail, io, deps);
     }
 
     if (command === "db") {
@@ -296,6 +305,13 @@ async function cmdCreate(
 
   io.stdout.write(`created organization ${formatOrg(org)}\n`);
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
+  await armOrgCloudSync({
+    orgHash: keys.orgHash,
+    e2eKeyB64: keys.e2eKey,
+    slug,
+    socketPath: opts.socketPath ?? config.nodeSocketPath,
+    io,
+  });
   io.stdout.write(
     `tip: org db create ${slug} company && org bind ${slug} company --root ~/code/…\n`,
   );
@@ -540,6 +556,95 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
 
   io.stdout.write(`joined organization ${formatOrg(org)}\n`);
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
+  await armOrgCloudSync({
+    orgHash: invite.org_hash,
+    e2eKeyB64: invite.e2e_key,
+    slug: invite.slug,
+    socketPath: opts.socketPath ?? config.nodeSocketPath,
+    io,
+  });
+  return 0;
+}
+
+async function armOrgCloudSync(input: {
+  orgHash: string;
+  e2eKeyB64: string;
+  slug: string;
+  socketPath?: string;
+  io: Io;
+}): Promise<void> {
+  const result: OrgSyncRegisterResult = await registerOrgCloudSync({
+    orgHash: input.orgHash,
+    e2eKeyB64: input.e2eKeyB64,
+    slug: input.slug,
+    socketPath: input.socketPath,
+  });
+  if (result.ok) {
+    input.io.stdout.write(
+      `org cloud-sync armed org_hash=${result.org_hash ?? input.orgHash} sync_enabled=${result.sync_enabled ? "yes" : "no"}\n`,
+    );
+    if (result.note) input.io.stdout.write(`${result.note}\n`);
+  } else if (result.skipped) {
+    input.io.stderr.write(
+      `org cloud-sync not armed (${result.skipped}). Local membership is fine; upgrade Mini or enable cloud_sync.json for multi-device org backup.\n`,
+    );
+  } else {
+    input.io.stderr.write(
+      `org cloud-sync register failed: ${result.error ?? "unknown"}\n`,
+    );
+  }
+}
+
+async function cmdSync(
+  sub: string | undefined,
+  rest: string[],
+  io: Io,
+  deps: CliDeps,
+): Promise<number> {
+  const opts = parseOptions(rest);
+  if (!sub || sub === "status" || sub === "targets") {
+    const listed = await listOrgCloudSyncTargets({
+      socketPath: opts.socketPath,
+    });
+    if (listed.skipped) {
+      io.stdout.write(`org sync: ${listed.skipped}\n`);
+      return 0;
+    }
+    if (listed.error) {
+      throw new Error(listed.error);
+    }
+    io.stdout.write(
+      `sync_enabled=${listed.sync_enabled ? "yes" : "no"} targets=${listed.targets.length}\n`,
+    );
+    for (const t of listed.targets) {
+      io.stdout.write(
+        `  org_hash=${t.org_hash} slug=${t.slug || "-"} active=${t.active}\n`,
+      );
+    }
+    if (listed.target_prefixes.length > 0) {
+      io.stdout.write(`engine_prefixes=${listed.target_prefixes.join(",")}\n`);
+    }
+    return 0;
+  }
+  if (sub === "arm" && rest[0]) {
+    const slug = rest[0]!;
+    const armOpts = parseOptions(rest.slice(1));
+    const { client, config } = await loadSession(armOpts, deps);
+    const secrets = deps.lastSecrets ?? newLastSecretsCli();
+    const org = await getOrganization(client, config, slug);
+    const e2eKey = secrets.get(e2eSecretSlug(slug));
+    await armOrgCloudSync({
+      orgHash: org.orgHash,
+      e2eKeyB64: e2eKey,
+      slug: org.slug,
+      socketPath: armOpts.socketPath ?? config.nodeSocketPath,
+      io,
+    });
+    return 0;
+  }
+  io.stdout.write(
+    `org sync subcommands:\n  org sync status\n  org sync arm <slug>\n`,
+  );
   return 0;
 }
 
@@ -992,6 +1097,7 @@ Other:
   org join --sealed orgseal1:…                 # join from pubkey-sealed package
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
+  org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
   org schema-json
   org help
 
