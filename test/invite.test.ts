@@ -34,3 +34,37 @@ describe("org invite", () => {
     expect(() => parseInvite(invite)).toThrow(/org_hash does not match/);
   });
 });
+
+import { buildAgentInstructions, buildClaimAgentInstructions } from "../src/invite.ts";
+
+describe("agent invite instructions", () => {
+  it("file-path instructions use public install path and never embed e2e material", () => {
+    const text = buildAgentInstructions({
+      invite: { slug: "friends", name: "Friends" },
+      invitePath: "/tmp/friends.invite.json",
+    });
+    expect(text).toContain("last-stack-install-apps");
+    expect(text).toContain("brew services start lastdb");
+    expect(text).toContain("github.com/EdgeVector/last-stack");
+        expect(text).toContain("lastsecrets init");
+    expect(text).toContain("org init");
+    expect(text).toContain("org join --from");
+    expect(text).toContain("/tmp/friends.invite.json");
+    expect(text).not.toContain("e2e_key");
+    expect(text).not.toContain("edgevector/tap/lastdb");
+  });
+
+  it("claim instructions include claim id only", () => {
+    const text = buildClaimAgentInstructions({
+      invite: { slug: "friends", name: "Friends" },
+      claim: {
+        claim_id: "claim-abc",
+        recipient_identity: "user-xyz",
+      },
+    });
+    expect(text).toContain("org join --claim claim-abc");
+    expect(text).toContain("user-xyz");
+    expect(text).toContain("last-stack-install-apps");
+    expect(text).not.toContain("e2e_key");
+  });
+});

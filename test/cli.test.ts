@@ -217,9 +217,11 @@ describe("org CLI", () => {
       expect(code).toBe(0);
       const agentInvite = JSON.parse(readFileSync(agentInvitePath, "utf8"));
       expect(agentInvite.e2e_key).toBe(invite.e2e_key);
-      expect(io.out()).toContain("Join instructions for Edge Vector");
-      expect(io.out()).toContain(`org join --from ${agentInvitePath}`);
-      expect(io.out()).toContain("Do NOT paste the invite JSON into email");
+      expect(io.out()).toContain("LastDB org invite — agent instructions");
+      expect(io.out()).toContain("**Edge Vector**");
+      expect(io.out()).toContain("last-stack-install-apps");
+      expect(io.out()).toContain(agentInvitePath);
+      expect(io.out()).toContain("org join --from");
       expect(io.out()).not.toContain("e2e_key");
       expect(io.out()).not.toContain(invite.e2e_key);
       expect(io.err()).toContain("wrote invite");
@@ -297,7 +299,8 @@ describe("org CLI", () => {
       const claimId = [...transport.claims.keys()][0]!;
       expect(io.out()).toContain(`org join --claim ${claimId}`);
       expect(io.out()).toContain("mailto:teammate@example.com");
-      expect(io.out()).toContain("non-secret claim id");
+      expect(io.out()).toContain("non-secret claim");
+      expect(io.out()).toContain("last-stack-install-apps");
       expect(io.out()).not.toContain("e2e_key");
       expect(io.out()).not.toContain(e2eKey);
       expect(io.err()).toBe("");
