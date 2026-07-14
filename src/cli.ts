@@ -12,7 +12,15 @@ import {
   personalDb,
   type DbHandle,
 } from "./db-handle.ts";
-import { buildAgentInstructions, buildInvite, parseInvite, serializeInvite } from "./invite.ts";
+import {
+  buildAgentInstructions,
+  buildClaimAgentInstructions,
+  buildInvite,
+  newInviteClaimId,
+  parseInvite,
+  serializeInvite,
+} from "./invite.ts";
+import { newInviteTransport, type InviteTransport } from "./invite-transport.ts";
 import { defaultNodeUrl, newLastDbClient, resolveSocketPath } from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
 import { ResolveError, resolveWriteTarget } from "./resolve.ts";
@@ -60,6 +68,7 @@ const defaultIo: Io = {
 
 export type CliDeps = {
   lastSecrets?: LastSecretsCli;
+  inviteTransport?: InviteTransport;
   newClient?: typeof newLastDbClient;
   /** Override wrapApp for tests. */
   wrapApp?: typeof wrapApp;
@@ -326,6 +335,25 @@ async function cmdInvite(
     e2eKey,
     createdBy: config.userHash,
   });
+  if (opts.to && opts.out) {
+    throw new Error("invite --to cannot be combined with --out; use one delivery path");
+  }
+
+  if (opts.to) {
+    const transport = deps.inviteTransport ?? newInviteTransport();
+    const claim = await transport.deliver({
+      recipientIdentity: opts.to,
+      claimId: newInviteClaimId(),
+      invite,
+    });
+    if (opts.agent) {
+      io.stdout.write(buildClaimAgentInstructions({ invite, claim }));
+    } else {
+      io.stdout.write(`delivered sealed org invite claim ${claim.claim_id} to ${opts.to}\n`);
+    }
+    return 0;
+  }
+
   const body = serializeInvite(invite);
   if (opts.out) {
     mkdirSync(dirname(opts.out), { recursive: true, mode: 0o700 });
@@ -346,11 +374,19 @@ async function cmdInvite(
 }
 
 async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
-  if (!opts.from) {
-    throw new Error("join requires --from <invite.json>");
+  if (!opts.from && !opts.claim) {
+    throw new Error("join requires --from <invite.json> or --claim <id>");
   }
-  const raw = JSON.parse(readFileSync(opts.from, "utf8"));
-  const invite = parseInvite(raw);
+  if (opts.from && opts.claim) {
+    throw new Error("join accepts only one of --from or --claim");
+  }
+  const invite = opts.claim
+    ? parseInvite(
+        await (deps.inviteTransport ?? newInviteTransport()).claim({
+          claimId: opts.claim,
+        }),
+      )
+    : parseInvite(JSON.parse(readFileSync(opts.from!, "utf8")));
   const { client, config } = await loadSession(opts, deps);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
 
@@ -657,6 +693,8 @@ type Options = {
   out?: string;
   agent?: boolean;
   from?: string;
+  to?: string;
+  claim?: string;
   root?: string;
   cwd?: string;
   defaultDb?: string;
@@ -746,6 +784,12 @@ function parseOptions(args: string[]): Options {
       case "--from":
         opts.from = next();
         break;
+      case "--to":
+        opts.to = next();
+        break;
+      case "--claim":
+        opts.claim = next();
+        break;
       case "--root":
         opts.root = next();
         break;
@@ -798,8 +842,9 @@ ${usageWrapperLine()}
 
 Other:
   org list | show <slug>
+  org invite <slug> --to recipient-identity [--agent]
   org invite <slug> --out invite.json [--agent]
-  org join --from invite.json
+  org join --claim CLAIM_ID | --from invite.json
   org schema-json
   org help
 
