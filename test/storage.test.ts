@@ -92,4 +92,27 @@ describe("org storage", () => {
     const dbs = await listOrgDatabases(client, config, "edgevector");
     expect(dbs.map((d) => d.dbSlug)).toEqual(["company"]);
   });
+
+  it("falls back when an older org schema rejects default_db", async () => {
+    const client = memoryClient();
+    const createRecord = client.createRecord.bind(client);
+    client.createRecord = async (opts) => {
+      if ("default_db" in opts.fields) throw new Error("unknown_fields");
+      await createRecord(opts);
+    };
+
+    const org = await putOrganization(client, config, {
+      slug: "legacy",
+      name: "Legacy",
+      orgHash: "abc123",
+      orgPublicKey: "pub",
+      role: "owner",
+      defaultDb: "company",
+      createdBy: "u1",
+    });
+
+    expect(org.defaultDb).toBe("company");
+    const stored = client.store.get("org/Organization::legacy");
+    expect(stored?.fields.default_db).toBeUndefined();
+  });
 });
