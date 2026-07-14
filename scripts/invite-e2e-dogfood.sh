@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated inviter → friend org invite dogfood.
+# Isolated inviter -> friend org invite dogfood.
 # Boots two throwaway lastdbd homes; never touches the primary ~/.lastdb node.
 #
 # Usage:
@@ -35,6 +35,7 @@ need curl
 need python3
 [ -f "$ORG_CLI" ] || { echo "missing ORG_CLI=$ORG_CLI" >&2; exit 2; }
 [ -f "$LS_CLI" ] || { echo "missing LS_CLI=$LS_CLI" >&2; exit 2; }
+export ORG_LASTSECRETS_BIN="${ORG_LASTSECRETS_BIN:-$LS_CLI}"
 
 org_cmd() { "$BUN" "$ORG_CLI" "$@"; }
 ls_cmd() { "$BUN" "$LS_CLI" "$@"; }
@@ -43,7 +44,7 @@ ROOT="$(mktemp -d /tmp/org-invite-dogfood.XXXXXX)"
 INVITER_HOME="$ROOT/inviter"
 FRIEND_HOME="$ROOT/friend"
 mkdir -p "$INVITER_HOME" "$FRIEND_HOME"
-INVITE_FILE="$ROOT/friends.invite.json"
+SEALED_FILE="$ROOT/friends.sealed.txt"
 FAILS=0
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 ok() { echo "OK $*"; }
@@ -88,7 +89,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- inviter ---
+# --- inviter: create the org ---
 start_node "$INVITER_HOME" inviter
 export HOME="$INVITER_HOME"
 export LASTDB_HOME="$INVITER_HOME/.lastdb"
@@ -97,17 +98,8 @@ SOCK_I="$LASTDB_HOME/data/folddb.sock"
 ls_cmd init --socket "$SOCK_I"
 org_cmd init --socket "$SOCK_I"
 org_cmd create friends --name "Friends Dogfood" --socket "$SOCK_I"
-org_cmd invite friends --agent --out "$INVITE_FILE" --socket "$SOCK_I" \
-  >"$ROOT/agent-instructions.txt" 2>"$ROOT/agent-stderr.txt" || fail "invite --agent"
-cat "$ROOT/agent-stderr.txt" || true
 
-[ -f "$INVITE_FILE" ] && ok "invite file mode=$(stat -f %Lp "$INVITE_FILE" 2>/dev/null || stat -c %a "$INVITE_FILE")" || fail "invite file missing"
-grep -q 'e2e_key' "$ROOT/agent-instructions.txt" && fail "instructions contain e2e_key" || ok "no e2e_key in instructions"
-KEY_SNIP="$(python3 -c "import json; print(json.load(open('$INVITE_FILE'))['e2e_key'][:16])")"
-grep -Fq "$KEY_SNIP" "$ROOT/agent-instructions.txt" && fail "instructions leak secret bytes" || ok "no secret leak in instructions"
-grep -q 'last-stack-install-apps' "$ROOT/agent-instructions.txt" && ok "public install path present" || fail "missing install path"
-
-# --- friend ---
+# --- friend: install/init/register local receive identity ---
 start_node "$FRIEND_HOME" friend
 export HOME="$FRIEND_HOME"
 export LASTDB_HOME="$FRIEND_HOME/.lastdb"
@@ -115,7 +107,38 @@ SOCK_F="$LASTDB_HOME/data/folddb.sock"
 
 ls_cmd init --socket "$SOCK_F"
 org_cmd init --socket "$SOCK_F"
-org_cmd join --from "$INVITE_FILE" --socket "$SOCK_F"
+org_cmd receive --json --socket "$SOCK_F" >"$ROOT/friend-receive.json"
+FRIEND_PUBKEY="$(python3 -c "import json; print(json.load(open('$ROOT/friend-receive.json'))['public_key'])")"
+FRIEND_FINGERPRINT="$(python3 -c "import json; print(json.load(open('$ROOT/friend-receive.json'))['fingerprint'])")"
+case "$FRIEND_PUBKEY" in
+  orgpk1:*) ok "friend receive public key fingerprint=$FRIEND_FINGERPRINT" ;;
+  *) fail "friend receive did not produce orgpk1 public key" ;;
+esac
+
+# --- inviter: seal to friend's public key and copy agent instructions ---
+export HOME="$INVITER_HOME"
+export LASTDB_HOME="$INVITER_HOME/.lastdb"
+org_cmd invite friends --to "$FRIEND_PUBKEY" --agent --out-sealed "$SEALED_FILE" --socket "$SOCK_I" \
+  >"$ROOT/agent-instructions.txt" 2>"$ROOT/agent-stderr.txt" || fail "invite --to orgpk1 --agent"
+cat "$ROOT/agent-stderr.txt" || true
+
+[ -f "$SEALED_FILE" ] && ok "sealed package file mode=$(stat -f %Lp "$SEALED_FILE" 2>/dev/null || stat -c %a "$SEALED_FILE")" || fail "sealed package file missing"
+grep -q 'e2e_key' "$ROOT/agent-instructions.txt" && fail "instructions contain e2e_key" || ok "no e2e_key in instructions"
+grep -q 'orgseal1:' "$ROOT/agent-instructions.txt" && ok "sealed package present in instructions" || fail "missing sealed package"
+grep -q 'org join --sealed' "$ROOT/agent-instructions.txt" && ok "sealed join command present" || fail "missing sealed join command"
+grep -q 'last-stack-install-apps' "$ROOT/agent-instructions.txt" && ok "public install path present" || fail "missing install path"
+grep -q 'org join --from' "$ROOT/agent-instructions.txt" && fail "instructions point to secret-file fallback" || ok "no secret-file join path in preferred instructions"
+SEALED="$(grep -Eo 'orgseal1:[A-Za-z0-9_-]+' "$ROOT/agent-instructions.txt" | head -1 || true)"
+[ -n "$SEALED" ] && ok "sealed package extracted" || fail "sealed package extraction"
+if [ -s "$SEALED_FILE" ]; then
+  FILE_SEALED="$(tr -d '\n\r\t ' <"$SEALED_FILE")"
+  [ "$FILE_SEALED" = "$SEALED" ] && ok "sealed file matches instructions" || fail "sealed file mismatch"
+fi
+
+# --- friend: join with sealed package on the same receive identity ---
+export HOME="$FRIEND_HOME"
+export LASTDB_HOME="$FRIEND_HOME/.lastdb"
+org_cmd join --sealed "$SEALED" --socket "$SOCK_F"
 org_cmd list --socket "$SOCK_F" | tee "$ROOT/friend-list.txt"
 org_cmd show friends --socket "$SOCK_F" | tee "$ROOT/friend-show.txt"
 
