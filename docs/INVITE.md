@@ -90,6 +90,11 @@ embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 
 ## Dogfood (developers)
 
+The dogfood script boots two throwaway Mini homes and proves the preferred
+public-key sealed path end to end: friend `org receive`, admin
+`org invite --to orgpk1:... --agent`, friend `org join --sealed`, then
+`org show`.
+
 ```bash
 LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
   scripts/invite-e2e-dogfood.sh
