@@ -129,15 +129,16 @@ Design: brain `design-org-context-resolve-from-cwd`.
 
 | In | Out (later) |
 |----|-------------|
-| Local create/join/list | Multi-writer cloud sync (B2/R2 org prefix) |
+| Local create/join/list | Automatic storage_prefix=org_hash on all org DB app writes |
 | Sealed invite claim interface | Production membership/revoke UI |
-| LastSecrets key custody | Full OrgSyncEngine in fold |
+| LastSecrets key custody | Full two-Mini kanban round-trip dogfood |
 | Named shared DB registry | Per-field trust domains on org data |
 | Cohabit same Mini node | Separate per-org processes |
+| **Arm org cloud-sync** on create/join (`org sync status`) | — |
 
-Cloud multi-member sync still follows the older `org_shared_sync` design; this
-app is the local membership + key + named-DB registry that makes that possible
-without a second daemon.
+Create/join register the org with Mini (`POST /api/org/sync/register`) so the
+node can append/pull an encrypted org log when `cloud_sync.json` is enabled.
+Without cloud or a new enough Mini, membership still works locally (soft skip).
 
 ## Development
 
