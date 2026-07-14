@@ -152,3 +152,7 @@ bun run typecheck
 
 Canonical remote: `lastdb:///org`. Required CI gate: `.lastgit/ci.sh`.
 Review venue: `.last-stack/pr-venue` = `lastgit`.
+
+No GitHub mirror is configured for this private app today. The canonical checkout
+has only the `lastgit` remote and no `.github/workflows`; if a GitHub remote is
+added later, add continuous LastGit to GitHub mirror sync in the same change.

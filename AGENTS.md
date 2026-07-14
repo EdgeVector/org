@@ -32,3 +32,6 @@ org db create edgevector company --name "Company DB"
 
 Canonical remote: `lastdb:///org`. Review artifacts are LastGit CRs
 (`.last-stack/pr-venue` = `lastgit`). Required gate: `.lastgit/ci.sh`.
+Do not use GitHub for review. There is no GitHub mirror for this private app
+unless a future change adds both an `origin` remote and continuous LastGit to
+GitHub mirror sync.
