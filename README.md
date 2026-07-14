@@ -22,7 +22,8 @@ only as `lastsecrets://org-<slug>-e2e`.
 ## Install
 
 ```sh
-cd ~/code/edgevector/org   # or clone lastdb:///org
+git clone https://github.com/EdgeVector/org.git && cd org
+# EdgeVector contributors may also use: lastdb:///org
 bun install
 bun link
 ```
@@ -148,11 +149,14 @@ bun test
 bun run typecheck
 ```
 
-## LastGit
+## Install sources
 
-Canonical remote: `lastdb:///org`. Required CI gate: `.lastgit/ci.sh`.
-Review venue: `.last-stack/pr-venue` = `lastgit`.
+- **Public download (invitees / cold install):**
+  `https://github.com/EdgeVector/org` — clone with normal `git`; no LastDB
+  node and no LastGit helper required to *get* the CLI source.
+- **EdgeVector contributor review venue:** LastGit `lastdb:///org`
+  (`.last-stack/pr-venue` = `lastgit`, gate `.lastgit/ci.sh`).
 
-No GitHub mirror is configured for this private app today. The canonical checkout
-has only the `lastgit` remote and no `.github/workflows`; if a GitHub remote is
-added later, add continuous LastGit to GitHub mirror sync in the same change.
+GitHub is the public install mirror so someone can receive an invite and run
+`org join` after `last-stack-install-apps`. LastGit remains the internal CR
+path for EdgeVector contributors.
