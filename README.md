@@ -45,25 +45,36 @@ org db create edgevector company --name "Company DB" \
 org list
 org show edgevector
 
-# hand off to a teammate (file contains the raw e2e key — secret!)
-org invite edgevector --out /tmp/edgevector.invite.json --agent
+# hand off to a teammate by sealed messaging claim
+org invite edgevector --to mailto:teammate@example.com --agent
 # teammate:
-org join --from /tmp/edgevector.invite.json
+org join --claim org-claim-...
 ```
 
 ## Invite a person
 
-Use two channels:
+Preferred path: send a non-secret claim instruction and let Exemem messaging
+carry the sealed org key.
 
-1. Create the sensitive invite file and copy the printed agent instructions:
+1. Deliver the sealed invite and copy the printed agent instructions:
    ```sh
-   org invite edgevector --out /tmp/edgevector.invite.json --agent
+   org invite edgevector --to mailto:teammate@example.com --agent
    ```
-2. Send only the printed instructions by email or chat. Do not paste the invite
-   JSON into that message.
-3. Send `/tmp/edgevector.invite.json` separately. The recipient follows the
-   instructions, runs `org join --from PATH`, verifies with `org show
-   edgevector`, and deletes the invite file after joining.
+2. Send only the printed instructions by email or chat. They contain only the
+   claim id and setup commands.
+3. The recipient follows the instructions, runs `org join --claim CLAIM_ID`,
+   and verifies with `org show edgevector`.
+
+Fallback when messaging is not available: create a sensitive invite file and
+move it out of band.
+
+```sh
+org invite edgevector --out /tmp/edgevector.invite.json --agent
+org join --from /tmp/edgevector.invite.json
+```
+
+The fallback file embeds the raw E2E key. Treat it like a password, never paste
+its contents into email or chat, and delete it after joining.
 
 ## Commands
 
@@ -72,8 +83,10 @@ Use two channels:
 | `org init` | Declare org schemas (Organization, OrgDatabase, PathBinding) |
 | `org create <slug>` | New org + LastSecrets E2E/private keys |
 | `org list` / `org show <slug>` | Metadata only (no raw keys) |
-| `org invite <slug> --out FILE [--agent]` | One-time join bundle plus optional safe recipient instructions |
-| `org join --from FILE` | Import invite; store E2E key via LastSecrets |
+| `org invite <slug> --to IDENTITY [--agent]` | Deliver a sealed invite claim via Exemem messaging |
+| `org invite <slug> --out FILE [--agent]` | Secret-file fallback plus optional safe recipient instructions |
+| `org join --claim ID` | Claim sealed invite; store E2E key via LastSecrets |
+| `org join --from FILE` | Import fallback invite file; store E2E key via LastSecrets |
 | `org db create/list/show` | Named shared DBs under an org |
 | `org bind <org> <db> --root PATH` | Place work under this tree → that DB |
 | `org resolve` | Print `lastdb://…` for cwd (or `--cwd` / `--db`) |
@@ -103,7 +116,9 @@ Design: brain `design-org-context-resolve-from-cwd`.
 
 ## Security notes
 
-- **Invite files are secrets.** They embed the raw E2E key so a peer can join
+- Prefer `org invite --to … --agent`. The email/chat text contains only a
+  non-secret claim id; Exemem messaging delivers the sealed org key.
+- **Invite files are fallback secrets.** They embed the raw E2E key so a peer can join
   without sharing your LastSecrets store. Prefer `--out` (mode 0600) over
   printing to stdout; delete after join.
 - `org invite --agent` prints copy-paste recipient instructions only. The
@@ -117,6 +132,7 @@ Design: brain `design-org-context-resolve-from-cwd`.
 | In | Out (later) |
 |----|-------------|
 | Local create/join/list | Multi-writer cloud sync (B2/R2 org prefix) |
+| Sealed invite claim interface | Production membership/revoke UI |
 | LastSecrets key custody | Full OrgSyncEngine in fold |
 | Named shared DB registry | Per-field trust domains on org data |
 | Cohabit same Mini node | Separate per-org processes |

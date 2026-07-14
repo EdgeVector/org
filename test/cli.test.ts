@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { run, type CliDeps } from "../src/cli.ts";
+import type { InviteTransport } from "../src/invite-transport.ts";
+import { buildInviteClaim, type InviteClaim, type OrgInvite } from "../src/invite.ts";
 import type { LastDbClient, QueryRow } from "../src/lastdb.ts";
 import type { LastSecretsCli } from "../src/lastsecrets.ts";
 
@@ -93,6 +95,38 @@ function memorySecrets(): LastSecretsCli & { bag: Map<string, string> } {
     },
     ref(slug) {
       return `lastsecrets://${slug}`;
+    },
+  };
+}
+
+function memoryInviteTransport(): InviteTransport & {
+  claims: Map<string, OrgInvite>;
+  claimMetadata: Map<string, InviteClaim>;
+  recipients: Map<string, string>;
+} {
+  const claims = new Map<string, OrgInvite>();
+  const claimMetadata = new Map<string, InviteClaim>();
+  const recipients = new Map<string, string>();
+  return {
+    claims,
+    claimMetadata,
+    recipients,
+    async deliver({ recipientIdentity, claimId, invite }) {
+      const claim = buildInviteClaim({
+        invite,
+        claimId,
+        recipientIdentity,
+        sealedBlob: `mock-sealed:${claimId}`,
+      });
+      claims.set(claim.claim_id, invite);
+      claimMetadata.set(claim.claim_id, claim);
+      recipients.set(claim.claim_id, recipientIdentity);
+      return claim;
+    },
+    async claim({ claimId }) {
+      const invite = claims.get(claimId);
+      if (!invite) throw new Error(`claim not found: ${claimId}`);
+      return invite;
     },
   };
 }
@@ -212,6 +246,119 @@ describe("org CLI", () => {
       expect(io.out()).toContain("joined organization");
       expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(invite.e2e_key);
       expect(memberClient.store.size).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("invites by sealed claim without putting raw key material in instructions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-claim-"));
+    const configPath = join(dir, "config.json");
+    const client = memoryClient("owner-1");
+    const secrets = memorySecrets();
+    const transport = memoryInviteTransport();
+    const deps: CliDeps = {
+      lastSecrets: secrets,
+      inviteTransport: transport,
+      newClient: () => client,
+    };
+
+    try {
+      let io = captureIo();
+      let code = await run(["init", "--config", configPath], io, deps);
+      expect(code).toBe(0);
+
+      io = captureIo();
+      code = await run(
+        ["create", "edgevector", "--name", "Edge Vector", "--config", configPath],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      const e2eKey = secrets.bag.get("org-edgevector-e2e");
+      expect(e2eKey).toBeTruthy();
+
+      io = captureIo();
+      code = await run(
+        [
+          "invite",
+          "edgevector",
+          "--to",
+          "mailto:teammate@example.com",
+          "--agent",
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      expect(transport.claims.size).toBe(1);
+      const claimId = [...transport.claims.keys()][0]!;
+      expect(io.out()).toContain(`org join --claim ${claimId}`);
+      expect(io.out()).toContain("mailto:teammate@example.com");
+      expect(io.out()).toContain("non-secret claim id");
+      expect(io.out()).not.toContain("e2e_key");
+      expect(io.out()).not.toContain(e2eKey);
+      expect(io.err()).toBe("");
+
+      const memberClient = memoryClient("member-2");
+      const memberSecrets = memorySecrets();
+      const memberDeps: CliDeps = {
+        lastSecrets: memberSecrets,
+        inviteTransport: transport,
+        newClient: () => memberClient,
+      };
+
+      io = captureIo();
+      code = await run(["join", "--claim", claimId, "--config", configPath], io, memberDeps);
+      expect(code).toBe(0);
+      expect(io.out()).toContain("joined organization");
+      expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(e2eKey);
+      expect(memberClient.store.size).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when sealed claim transport is unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-claim-closed-"));
+    const configPath = join(dir, "config.json");
+    const client = memoryClient("owner-1");
+    const secrets = memorySecrets();
+    const deps: CliDeps = {
+      lastSecrets: secrets,
+      newClient: () => client,
+    };
+
+    try {
+      let io = captureIo();
+      let code = await run(["init", "--config", configPath], io, deps);
+      expect(code).toBe(0);
+
+      io = captureIo();
+      code = await run(
+        ["create", "edgevector", "--name", "Edge Vector", "--config", configPath],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+
+      io = captureIo();
+      code = await run(
+        [
+          "invite",
+          "edgevector",
+          "--to",
+          "mailto:teammate@example.com",
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      );
+      expect(code).toBe(1);
+      expect(io.err()).toContain("sealed invite transport unavailable");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
