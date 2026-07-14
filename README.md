@@ -46,10 +46,24 @@ org list
 org show edgevector
 
 # hand off to a teammate (file contains the raw e2e key — secret!)
-org invite edgevector --out /tmp/edgevector.invite.json
+org invite edgevector --out /tmp/edgevector.invite.json --agent
 # teammate:
 org join --from /tmp/edgevector.invite.json
 ```
+
+## Invite a person
+
+Use two channels:
+
+1. Create the sensitive invite file and copy the printed agent instructions:
+   ```sh
+   org invite edgevector --out /tmp/edgevector.invite.json --agent
+   ```
+2. Send only the printed instructions by email or chat. Do not paste the invite
+   JSON into that message.
+3. Send `/tmp/edgevector.invite.json` separately. The recipient follows the
+   instructions, runs `org join --from PATH`, verifies with `org show
+   edgevector`, and deletes the invite file after joining.
 
 ## Commands
 
@@ -58,7 +72,7 @@ org join --from /tmp/edgevector.invite.json
 | `org init` | Declare org schemas (Organization, OrgDatabase, PathBinding) |
 | `org create <slug>` | New org + LastSecrets E2E/private keys |
 | `org list` / `org show <slug>` | Metadata only (no raw keys) |
-| `org invite <slug> --out FILE` | One-time join bundle (sensitive) |
+| `org invite <slug> --out FILE [--agent]` | One-time join bundle plus optional safe recipient instructions |
 | `org join --from FILE` | Import invite; store E2E key via LastSecrets |
 | `org db create/list/show` | Named shared DBs under an org |
 | `org bind <org> <db> --root PATH` | Place work under this tree → that DB |
@@ -92,6 +106,9 @@ Design: brain `design-org-context-resolve-from-cwd`.
 - **Invite files are secrets.** They embed the raw E2E key so a peer can join
   without sharing your LastSecrets store. Prefer `--out` (mode 0600) over
   printing to stdout; delete after join.
+- `org invite --agent` prints copy-paste recipient instructions only. The
+  invite JSON is still separate secret material and should not be pasted into
+  email or chat.
 - Org records store only `lastsecrets://…` locators, never raw key material.
 - Agents must never paste E2E keys into Brain, Kanban, chat, or PRs.
 

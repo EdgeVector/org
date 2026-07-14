@@ -87,3 +87,31 @@ export function parseInvite(raw: unknown): OrgInvite {
 export function serializeInvite(invite: OrgInvite): string {
   return JSON.stringify(invite, null, 2) + "\n";
 }
+
+export function buildAgentInstructions(input: {
+  invite: Pick<OrgInvite, "slug" | "name">;
+  invitePath?: string;
+}): string {
+  const path = input.invitePath ?? "PATH_TO_INVITE_JSON";
+  return [
+    `Join instructions for ${input.invite.name} (${input.invite.slug})`,
+    "",
+    "These instructions are safe to send in email. Do NOT paste the invite JSON into email; the sender will provide that file separately.",
+    "",
+    "1. Install LastDB:",
+    "   brew install edgevector/tap/lastdb",
+    "2. Install the LastDB app bundle:",
+    "   last-stack-install-apps",
+    "   If the bundle is not available yet, clone/install the org and lastsecrets apps from EdgeVector.",
+    "3. Initialize local secret storage:",
+    "   lastsecrets init",
+    "4. Initialize org schemas on your LastDB node:",
+    "   org init",
+    "5. Save the separately provided invite file on this machine, then join:",
+    `   org join --from ${path}`,
+    "6. Verify membership:",
+    `   org show ${input.invite.slug}`,
+    "",
+    "Keep the invite file private and delete it after a successful join.",
+  ].join("\n") + "\n";
+}
