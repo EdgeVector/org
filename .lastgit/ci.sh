@@ -32,4 +32,10 @@ fi
 # 5. venue pin
 test "$(head -n 1 .last-stack/pr-venue)" = "lastgit"
 
+# 6. mirror policy
+if [ -d .github/workflows ]; then
+  echo "GitHub workflows require an explicit LastGit -> GitHub mirror setup" >&2
+  exit 1
+fi
+
 echo "ci-required: ok"
