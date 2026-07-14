@@ -12,7 +12,7 @@ import {
   personalDb,
   type DbHandle,
 } from "./db-handle.ts";
-import { buildInvite, parseInvite, serializeInvite } from "./invite.ts";
+import { buildAgentInstructions, buildInvite, parseInvite, serializeInvite } from "./invite.ts";
 import { defaultNodeUrl, newLastDbClient, resolveSocketPath } from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
 import { ResolveError, resolveWriteTarget } from "./resolve.ts";
@@ -330,8 +330,13 @@ async function cmdInvite(
   if (opts.out) {
     mkdirSync(dirname(opts.out), { recursive: true, mode: 0o700 });
     writeFileSync(opts.out, body, { encoding: "utf8", mode: 0o600 });
-    io.stdout.write(`wrote invite to ${opts.out} (contains raw e2e key — treat as secret)\n`);
-  } else {
+    const status = `wrote invite to ${opts.out} (contains raw e2e key — treat as secret)\n`;
+    if (opts.agent) io.stderr.write(status);
+    else io.stdout.write(status);
+  }
+  if (opts.agent) {
+    io.stdout.write(buildAgentInstructions({ invite, invitePath: opts.out }));
+  } else if (!opts.out) {
     io.stdout.write(body);
     io.stderr.write(
       "warning: invite printed to stdout and contains the raw e2e key; prefer --out <file>\n",
@@ -650,6 +655,7 @@ type Options = {
   name?: string;
   description?: string;
   out?: string;
+  agent?: boolean;
   from?: string;
   root?: string;
   cwd?: string;
@@ -734,6 +740,9 @@ function parseOptions(args: string[]): Options {
       case "--out":
         opts.out = next();
         break;
+      case "--agent":
+        opts.agent = true;
+        break;
       case "--from":
         opts.from = next();
         break;
@@ -789,7 +798,7 @@ ${usageWrapperLine()}
 
 Other:
   org list | show <slug>
-  org invite <slug> --out invite.json
+  org invite <slug> --out invite.json [--agent]
   org join --from invite.json
   org schema-json
   org help

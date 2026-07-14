@@ -165,6 +165,31 @@ describe("org CLI", () => {
       expect(invite.slug).toBe("edgevector");
       expect(invite.e2e_key).toBe(secrets.bag.get("org-edgevector-e2e"));
 
+      const agentInvitePath = join(dir, "agent-invite.json");
+      io = captureIo();
+      code = await run(
+        [
+          "invite",
+          "edgevector",
+          "--out",
+          agentInvitePath,
+          "--agent",
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+      const agentInvite = JSON.parse(readFileSync(agentInvitePath, "utf8"));
+      expect(agentInvite.e2e_key).toBe(invite.e2e_key);
+      expect(io.out()).toContain("Join instructions for Edge Vector");
+      expect(io.out()).toContain(`org join --from ${agentInvitePath}`);
+      expect(io.out()).toContain("Do NOT paste the invite JSON into email");
+      expect(io.out()).not.toContain("e2e_key");
+      expect(io.out()).not.toContain(invite.e2e_key);
+      expect(io.err()).toContain("wrote invite");
+
       // Join on a second "node" (fresh store + secrets, reusing schema hashes from config)
       const memberClient = memoryClient("member-2");
       // Seed member client with same schema hashes by reusing declare — config already has hashes.
