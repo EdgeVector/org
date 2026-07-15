@@ -144,7 +144,10 @@ export function newLastDbClient(opts: {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
-  const defaultHeaders = opts.userHash ? { "X-User-Hash": opts.userHash } : undefined;
+  const defaultHeaders: Record<string, string> = {
+    "X-LastDB-Client": "org",
+    ...(opts.userHash ? { "X-User-Hash": opts.userHash } : {}),
+  };
   const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
     : httpTransport(nodeUrl, defaultHeaders);
@@ -177,7 +180,7 @@ export function newLastDbClient(opts: {
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<unknown> => {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { "X-LastDB-Client": "org" };
     if (opts.userHash) headers["X-User-Hash"] = opts.userHash;
     let requestBody: string | undefined;
     if (body !== undefined) {
