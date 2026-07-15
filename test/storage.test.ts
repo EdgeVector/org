@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import type { Config } from "../src/config.ts";
 import type { LastDbClient, QueryRow } from "../src/lastdb.ts";
 import {
+  buildAdminOrgSlice,
   formatOrg,
   listOrgDatabases,
   listOrganizations,
@@ -114,5 +115,70 @@ describe("org storage", () => {
     expect(org.defaultDb).toBe("company");
     const stored = client.store.get("org/Organization::legacy");
     expect(stored?.fields.default_db).toBeUndefined();
+  });
+
+  it("builds a metadata-only admin slice for delivery", async () => {
+    const client = memoryClient();
+    await putOrganization(client, config, {
+      slug: "edgevector",
+      name: "Edge Vector",
+      orgHash: "secret-routing-hash",
+      orgPublicKey: "public-key-material",
+      e2eKeyRef: "lastsecrets://org-edgevector-e2e",
+      role: "owner",
+      defaultDb: "company",
+      createdBy: "u1",
+    });
+    await putOrgDatabase(client, config, {
+      orgSlug: "edgevector",
+      dbSlug: "company",
+      name: "Company",
+      description: "shared workspace",
+      orgHash: "secret-routing-hash",
+      createdBy: "u1",
+    });
+
+    const slice = buildAdminOrgSlice(
+      await listOrganizations(client, config),
+      await listOrgDatabases(client, config),
+      "2026-07-15T09:00:00.000Z",
+    );
+    const encoded = JSON.stringify(slice);
+
+    expect(slice).toEqual({
+      app_id: "org",
+      schema: "org.admin.slice.v1",
+      captured_at: "2026-07-15T09:00:00.000Z",
+      total_orgs: 1,
+      total_databases: 1,
+      orgs: [
+        {
+          slug: "edgevector",
+          name: "Edge Vector",
+          role: "owner",
+          default_db: "company",
+          default_db_locator: "lastdb://org/edgevector/company",
+          invite_status: "can_invite",
+          updated_at: expect.any(String),
+        },
+      ],
+      databases: [
+        {
+          org_slug: "edgevector",
+          db_slug: "company",
+          locator: "lastdb://org/edgevector/company",
+          name: "Company",
+          description: "shared workspace",
+          updated_at: expect.any(String),
+        },
+      ],
+    });
+    expect(encoded).not.toContain("secret-routing-hash");
+    expect(encoded).not.toContain("public-key-material");
+    expect(encoded).not.toContain("lastsecrets://");
+    expect(encoded).not.toContain("e2e_key_ref");
+    expect(encoded).not.toContain("org_public_key");
+    expect(encoded).not.toContain("org_hash");
+    expect(encoded).not.toContain("orgseal1:");
   });
 });

@@ -55,6 +55,7 @@ import {
   writeSessionPin,
 } from "./session.ts";
 import {
+  buildAdminOrgSlice,
   formatDb,
   formatOrg,
   getOrgDatabase,
@@ -114,6 +115,17 @@ export async function run(
 
     if (command === "schema-json") {
       io.stdout.write(`${JSON.stringify(ALL_SCHEMAS.map((s) => s.schema), null, 2)}\n`);
+      return 0;
+    }
+
+    if (command === "admin-slice") {
+      const opts = parseOptions([arg, ...tail].filter(Boolean) as string[]);
+      const { client, config } = await loadSession(opts, deps);
+      const slice = buildAdminOrgSlice(
+        await listOrganizations(client, config),
+        await listOrgDatabases(client, config),
+      );
+      io.stdout.write(`${JSON.stringify(slice, null, 2)}\n`);
       return 0;
     }
 
@@ -1098,6 +1110,7 @@ Other:
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
+  org admin-slice                              # metadata-only JSON for admin delivery
   org schema-json
   org help
 

@@ -59,6 +59,35 @@ export type OrgDatabase = {
   updatedAt: string;
 };
 
+export type AdminOrgSummary = {
+  slug: string;
+  name: string;
+  role: string;
+  default_db: string;
+  default_db_locator: string;
+  invite_status: string;
+  updated_at: string;
+};
+
+export type AdminOrgDatabaseSummary = {
+  org_slug: string;
+  db_slug: string;
+  locator: string;
+  name: string;
+  description: string;
+  updated_at: string;
+};
+
+export type AdminOrgSlice = {
+  app_id: "org";
+  schema: "org.admin.slice.v1";
+  captured_at: string;
+  total_orgs: number;
+  total_databases: number;
+  orgs: AdminOrgSummary[];
+  databases: AdminOrgDatabaseSummary[];
+};
+
 const ORG_FIELDS = organizationSchema.schema.fields.slice();
 const DB_FIELDS = orgDatabaseSchema.schema.fields.slice();
 const BIND_FIELDS = pathBindingSchema.schema.fields.slice();
@@ -327,6 +356,64 @@ export function toResolveBindings(stored: StoredPathBinding[]): PathBinding[] {
       dbSlug: b.dbSlug,
       orgHash: b.orgHash || undefined,
     }));
+}
+
+export function buildAdminOrgSlice(
+  orgs: Organization[],
+  databases: OrgDatabase[],
+  capturedAt = new Date().toISOString(),
+): AdminOrgSlice {
+  const dbsByOrg = new Map<string, OrgDatabase[]>();
+  for (const db of databases) {
+    const list = dbsByOrg.get(db.orgSlug) ?? [];
+    list.push(db);
+    dbsByOrg.set(db.orgSlug, list);
+  }
+
+  const slimOrgs = orgs
+    .map((org) => {
+      const fallbackDb = dbsByOrg.get(org.slug)?.[0]?.dbSlug ?? "";
+      const defaultDb = org.defaultDb || fallbackDb;
+      return {
+        slug: org.slug,
+        name: org.name,
+        role: org.role,
+        default_db: defaultDb,
+        default_db_locator: defaultDb ? orgDbLocator(org.slug, defaultDb) : "",
+        invite_status: inviteStatusForRole(org.role),
+        updated_at: org.updatedAt,
+      };
+    })
+    .sort((a, b) => a.slug.localeCompare(b.slug));
+
+  const slimDatabases = databases
+    .map((db) => ({
+      org_slug: db.orgSlug,
+      db_slug: db.dbSlug,
+      locator: orgDbLocator(db.orgSlug, db.dbSlug),
+      name: db.name,
+      description: db.description,
+      updated_at: db.updatedAt,
+    }))
+    .sort((a, b) => a.locator.localeCompare(b.locator));
+
+  return {
+    app_id: "org",
+    schema: "org.admin.slice.v1",
+    captured_at: capturedAt,
+    total_orgs: slimOrgs.length,
+    total_databases: slimDatabases.length,
+    orgs: slimOrgs,
+    databases: slimDatabases,
+  };
+}
+
+function orgDbLocator(orgSlug: string, dbSlug: string): string {
+  return `lastdb://org/${orgSlug}/${dbSlug}`;
+}
+
+function inviteStatusForRole(role: string): string {
+  return role === "owner" || role === "admin" ? "can_invite" : "member";
 }
 
 function orgToFields(org: Organization): Record<string, unknown> {
