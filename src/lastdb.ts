@@ -103,6 +103,7 @@ type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 const QUERY_PAGE_SIZE = 1000;
 const SOCKET_FILE_NAME = "folddb.sock";
 const DEFAULT_NODE_URL = "http://localhost:9001";
+const LASTDB_CLIENT_HEADER = "X-LastDB-Client";
 const noopCapabilityStore: CapabilityStore = {
   async store() {},
   async load() {
@@ -144,7 +145,8 @@ export function newLastDbClient(opts: {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
-  const defaultHeaders = opts.userHash ? { "X-User-Hash": opts.userHash } : undefined;
+  const defaultHeaders: Record<string, string> = { [LASTDB_CLIENT_HEADER]: OWNER_APP_ID };
+  if (opts.userHash) defaultHeaders["X-User-Hash"] = opts.userHash;
   const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
     : httpTransport(nodeUrl, defaultHeaders);
@@ -177,7 +179,7 @@ export function newLastDbClient(opts: {
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<unknown> => {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { [LASTDB_CLIENT_HEADER]: OWNER_APP_ID };
     if (opts.userHash) headers["X-User-Hash"] = opts.userHash;
     let requestBody: string | undefined;
     if (body !== undefined) {
