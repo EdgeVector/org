@@ -9,6 +9,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { OWNER_APP_ID } from "./schema.ts";
+
 export type OrgSyncRegisterResult = {
   ok: boolean;
   org_hash?: string;
@@ -58,6 +60,7 @@ async function udsJson(
     unix: socketPath,
     headers: {
       Host: "localhost",
+      "X-LastDB-Client": OWNER_APP_ID,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
