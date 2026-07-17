@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { formatDbLocator, LASTDB_DB_ENV, type DbHandle } from "./db-handle.ts";
 
@@ -133,6 +133,3 @@ export function usageWrapperLine(): string {
   org unuse              clear session pin
 `;
 }
-
-// silence unused import in typecheck when tree-shaken
-void dirname;
