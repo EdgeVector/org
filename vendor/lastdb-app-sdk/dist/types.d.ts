@@ -261,6 +261,8 @@ export interface QueryResult {
 }
 /** Options for `LastDbClient.queryAll` — the auto-paginating query helper. */
 export interface QueryAllOptions {
+    /** Admin opt-in for unfiltered full-schema drain. */
+    allowFullScan?: boolean;
     /**
      * Page size per request (the `limit` sent on each page). Defaults to 100,
      * production's `DEFAULT_QUERY_LIMIT`; production clamps anything above
