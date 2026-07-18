@@ -32,6 +32,15 @@ function schemaId(config: Config, kind: SchemaKind): string {
   return binding.schemaHash;
 }
 
+function hasSchemaBinding(config: Config, kind: SchemaKind): boolean {
+  try {
+    const b = schemaBinding(config, kind);
+    return Boolean(b.schemaHash || b.schemaName);
+  } catch {
+    return false;
+  }
+}
+
 export type Organization = {
   slug: string;
   name: string;
@@ -107,6 +116,7 @@ function arrayStringField(fields: Record<string, unknown>, key: string): string[
 
 /** Read-modify-write append into the single-row OrgIndex (Mini has no atomic array push). */
 async function addToOrgIndex(client: LastDbClient, config: Config, slug: string): Promise<void> {
+  if (!hasSchemaBinding(config, "OrgIndex")) return; // pre-upgrade config / unit tests
   const sid = schemaId(config, "OrgIndex");
   const existing = await client.queryByKey({
     schemaHash: sid,
@@ -124,7 +134,8 @@ async function addToOrgIndex(client: LastDbClient, config: Config, slug: string)
   }
 }
 
-async function readOrgSlugsFromIndex(client: LastDbClient, config: Config): Promise<string[]> {
+async function readOrgSlugsFromIndex(client: LastDbClient, config: Config): Promise<string[] | null> {
+  if (!hasSchemaBinding(config, "OrgIndex")) return null;
   const sid = schemaId(config, "OrgIndex");
   const row = await client.queryByKey({
     schemaHash: sid,
@@ -141,6 +152,7 @@ async function addToOrgDbIndex(
   orgSlug: string,
   dbSlug: string,
 ): Promise<void> {
+  if (!hasSchemaBinding(config, "OrgDbIndex")) return;
   const sid = schemaId(config, "OrgDbIndex");
   const existing = await client.queryByKey({
     schemaHash: sid,
@@ -178,6 +190,7 @@ async function addToPathBindingIndex(
   config: Config,
   bindingId: string,
 ): Promise<void> {
+  if (!hasSchemaBinding(config, "PathBindingIndex")) return;
   const sid = schemaId(config, "PathBindingIndex");
   const existing = await client.queryByKey({
     schemaHash: sid,
@@ -272,6 +285,11 @@ export async function listOrganizations(
 ): Promise<Organization[]> {
   const sid = schemaId(config, "Organization");
   const slugs = await readOrgSlugsFromIndex(client, config);
+  if (slugs === null) {
+    // Pre-index configs / unit tests: explicit admin full scan of the tiny org set.
+    const rows = await client.queryAll({ schemaHash: sid, fields: ORG_FIELDS });
+    return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
+  }
   const rows = await Promise.all(
     slugs.map((slug) => client.queryByKey({ schemaHash: sid, keyHash: slug, fields: ORG_FIELDS })),
   );
@@ -337,7 +355,16 @@ export async function listOrgDatabases(
   orgSlug?: string,
 ): Promise<OrgDatabase[]> {
   const sid = schemaId(config, "OrgDatabase");
-  const orgSlugs = orgSlug ? [assertSlug(orgSlug, "org slug")] : await readOrgSlugsFromIndex(client, config);
+  if (!hasSchemaBinding(config, "OrgDbIndex")) {
+    const rows = await client.queryAll({ schemaHash: sid, fields: DB_FIELDS });
+    let dbs = rows.map(rowToDb);
+    if (orgSlug) dbs = dbs.filter((d) => d.orgSlug === assertSlug(orgSlug, "org slug"));
+    return dbs.sort((a, b) => a.dbId.localeCompare(b.dbId));
+  }
+  const indexedOrgs = await readOrgSlugsFromIndex(client, config);
+  const orgSlugs = orgSlug
+    ? [assertSlug(orgSlug, "org slug")]
+    : (indexedOrgs ?? []);
   const dbIds = (
     await Promise.all(
       orgSlugs.map(async (org) => {
