@@ -156,7 +156,14 @@ describe("org CLI", () => {
       let io = captureIo();
       let code = await run(["init", "--config", configPath], io, deps);
       expect(code).toBe(0);
-      expect(client.declared).toEqual(["Organization", "OrgDatabase", "PathBinding"]);
+      expect(client.declared).toEqual([
+        "Organization",
+        "OrgDatabase",
+        "PathBinding",
+        "OrgIndex",
+        "OrgDbIndex",
+        "PathBindingIndex",
+      ]);
       expect(io.out()).toContain("initialized org config");
 
       io = captureIo();

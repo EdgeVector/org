@@ -333,7 +333,7 @@ export function newLastDbClient(opts: {
     },
     async queryAll({ schemaHash, fields }) {
       const result = await sdkDataPath((client) =>
-        client.queryAll(schemaHash, { fields }, { pageSize: QUERY_PAGE_SIZE }),
+        client.queryAll(schemaHash, { fields }, { pageSize: QUERY_PAGE_SIZE, allowFullScan: true }),
       );
       return result.rows.map(sdkRowToQueryRow);
     },

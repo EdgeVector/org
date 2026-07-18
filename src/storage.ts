@@ -9,8 +9,12 @@ import {
   assertSlug,
   dbId,
   e2eKeyRef,
+  INDEX_SCOPE,
   organizationSchema,
   orgDatabaseSchema,
+  orgDbIndexSchema,
+  orgIndexSchema,
+  pathBindingIndexSchema,
   pathBindingSchema,
   type SchemaKind,
 } from "./schema.ts";
@@ -26,6 +30,15 @@ function schemaId(config: Config, kind: SchemaKind): string {
     return binding.schemaName;
   }
   return binding.schemaHash;
+}
+
+function hasSchemaBinding(config: Config, kind: SchemaKind): boolean {
+  try {
+    const b = schemaBinding(config, kind);
+    return Boolean(b.schemaHash || b.schemaName);
+  } catch {
+    return false;
+  }
 }
 
 export type Organization = {
@@ -91,6 +104,122 @@ export type AdminOrgSlice = {
 const ORG_FIELDS = organizationSchema.schema.fields.slice();
 const DB_FIELDS = orgDatabaseSchema.schema.fields.slice();
 const BIND_FIELDS = pathBindingSchema.schema.fields.slice();
+const ORG_INDEX_FIELDS = orgIndexSchema.schema.fields.slice();
+const ORG_DB_INDEX_FIELDS = orgDbIndexSchema.schema.fields.slice();
+const PATH_BINDING_INDEX_FIELDS = pathBindingIndexSchema.schema.fields.slice();
+
+function arrayStringField(fields: Record<string, unknown>, key: string): string[] {
+  const value = fields[key];
+  if (Array.isArray(value)) return value.filter((x): x is string => typeof x === "string");
+  return [];
+}
+
+/** Read-modify-write append into the single-row OrgIndex (Mini has no atomic array push). */
+async function addToOrgIndex(client: LastDbClient, config: Config, slug: string): Promise<void> {
+  if (!hasSchemaBinding(config, "OrgIndex")) return; // pre-upgrade config / unit tests
+  const sid = schemaId(config, "OrgIndex");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: INDEX_SCOPE,
+    fields: ORG_INDEX_FIELDS,
+  });
+  const slugs = existing ? arrayStringField(existing.fields, "org_slugs") : [];
+  if (slugs.includes(slug)) return;
+  slugs.push(slug);
+  const fields = { scope: INDEX_SCOPE, org_slugs: slugs, updated_at: new Date().toISOString() };
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: INDEX_SCOPE, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: INDEX_SCOPE, fields });
+  }
+}
+
+async function readOrgSlugsFromIndex(client: LastDbClient, config: Config): Promise<string[] | null> {
+  if (!hasSchemaBinding(config, "OrgIndex")) return null;
+  const sid = schemaId(config, "OrgIndex");
+  const row = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: INDEX_SCOPE,
+    fields: ORG_INDEX_FIELDS,
+  });
+  return row ? arrayStringField(row.fields, "org_slugs") : [];
+}
+
+/** Read-modify-write append into the per-org OrgDbIndex partition. */
+async function addToOrgDbIndex(
+  client: LastDbClient,
+  config: Config,
+  orgSlug: string,
+  dbSlug: string,
+): Promise<void> {
+  if (!hasSchemaBinding(config, "OrgDbIndex")) return;
+  const sid = schemaId(config, "OrgDbIndex");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: orgSlug,
+    fields: ORG_DB_INDEX_FIELDS,
+  });
+  const dbSlugs = existing ? arrayStringField(existing.fields, "db_slugs") : [];
+  if (dbSlugs.includes(dbSlug)) return;
+  dbSlugs.push(dbSlug);
+  const fields = { org_slug: orgSlug, db_slugs: dbSlugs, updated_at: new Date().toISOString() };
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: orgSlug, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: orgSlug, fields });
+  }
+}
+
+async function readDbSlugsFromIndex(
+  client: LastDbClient,
+  config: Config,
+  orgSlug: string,
+): Promise<string[]> {
+  const sid = schemaId(config, "OrgDbIndex");
+  const row = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: orgSlug,
+    fields: ORG_DB_INDEX_FIELDS,
+  });
+  return row ? arrayStringField(row.fields, "db_slugs") : [];
+}
+
+/** Read-modify-write append into the single-row PathBindingIndex. */
+async function addToPathBindingIndex(
+  client: LastDbClient,
+  config: Config,
+  bindingId: string,
+): Promise<void> {
+  if (!hasSchemaBinding(config, "PathBindingIndex")) return;
+  const sid = schemaId(config, "PathBindingIndex");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: INDEX_SCOPE,
+    fields: PATH_BINDING_INDEX_FIELDS,
+  });
+  const ids = existing ? arrayStringField(existing.fields, "binding_ids") : [];
+  if (ids.includes(bindingId)) return;
+  ids.push(bindingId);
+  const fields = { scope: INDEX_SCOPE, binding_ids: ids, updated_at: new Date().toISOString() };
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: INDEX_SCOPE, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: INDEX_SCOPE, fields });
+  }
+}
+
+async function readBindingIdsFromIndex(client: LastDbClient, config: Config): Promise<string[]> {
+  if (!config.schemas.PathBindingIndex?.schemaHash && !config.schemas.PathBindingIndex?.schemaName) {
+    return [];
+  }
+  const sid = schemaId(config, "PathBindingIndex");
+  const row = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: INDEX_SCOPE,
+    fields: PATH_BINDING_INDEX_FIELDS,
+  });
+  return row ? arrayStringField(row.fields, "binding_ids") : [];
+}
 
 export async function putOrganization(
   client: LastDbClient,
@@ -130,6 +259,7 @@ export async function putOrganization(
     legacyFields: withoutKeys(fields, ["default_db"]),
     update: Boolean(existing),
   });
+  await addToOrgIndex(client, config, record.slug);
   return record;
 }
 
@@ -154,11 +284,19 @@ export async function listOrganizations(
   config: Config,
 ): Promise<Organization[]> {
   const sid = schemaId(config, "Organization");
-  const rows = await client.queryAll({
-    schemaHash: sid,
-    fields: ORG_FIELDS,
-  });
-  return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
+  const slugs = await readOrgSlugsFromIndex(client, config);
+  if (slugs === null) {
+    // Pre-index configs / unit tests: explicit admin full scan of the tiny org set.
+    const rows = await client.queryAll({ schemaHash: sid, fields: ORG_FIELDS });
+    return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
+  }
+  const rows = await Promise.all(
+    slugs.map((slug) => client.queryByKey({ schemaHash: sid, keyHash: slug, fields: ORG_FIELDS })),
+  );
+  return rows
+    .filter((row): row is QueryRow => row !== null)
+    .map(rowToOrg)
+    .sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 export async function putOrgDatabase(
@@ -207,6 +345,7 @@ export async function putOrgDatabase(
       fields,
     });
   }
+  await addToOrgDbIndex(client, config, input.orgSlug, input.dbSlug);
   return record;
 }
 
@@ -216,15 +355,28 @@ export async function listOrgDatabases(
   orgSlug?: string,
 ): Promise<OrgDatabase[]> {
   const sid = schemaId(config, "OrgDatabase");
-  const rows = await client.queryAll({
-    schemaHash: sid,
-    fields: DB_FIELDS,
-  });
-  let dbs = rows.map(rowToDb);
-  if (orgSlug) {
-    assertSlug(orgSlug, "org slug");
-    dbs = dbs.filter((d) => d.orgSlug === orgSlug);
+  if (!hasSchemaBinding(config, "OrgDbIndex")) {
+    const rows = await client.queryAll({ schemaHash: sid, fields: DB_FIELDS });
+    let dbs = rows.map(rowToDb);
+    if (orgSlug) dbs = dbs.filter((d) => d.orgSlug === assertSlug(orgSlug, "org slug"));
+    return dbs.sort((a, b) => a.dbId.localeCompare(b.dbId));
   }
+  const indexedOrgs = await readOrgSlugsFromIndex(client, config);
+  const orgSlugs = orgSlug
+    ? [assertSlug(orgSlug, "org slug")]
+    : (indexedOrgs ?? []);
+  const dbIds = (
+    await Promise.all(
+      orgSlugs.map(async (org) => {
+        const dbSlugs = await readDbSlugsFromIndex(client, config, org);
+        return dbSlugs.map((dbSlug) => dbId(org, dbSlug));
+      }),
+    )
+  ).flat();
+  const rows = await Promise.all(
+    dbIds.map((id) => client.queryByKey({ schemaHash: sid, keyHash: id, fields: DB_FIELDS })),
+  );
+  const dbs = rows.filter((row): row is QueryRow => row !== null).map(rowToDb);
   return dbs.sort((a, b) => a.dbId.localeCompare(b.dbId));
 }
 
@@ -294,6 +446,7 @@ export async function putPathBinding(
   } else {
     await client.createRecord({ schemaHash: sid, keyHash: bindingId, fields });
   }
+  await addToPathBindingIndex(client, config, bindingId);
   return record;
 }
 
@@ -306,8 +459,14 @@ export async function listPathBindings(
   }
   try {
     const sid = schemaId(config, "PathBinding");
-    const rows = await client.queryAll({ schemaHash: sid, fields: BIND_FIELDS });
-    return rows.map(rowToBinding).sort((a, b) => a.root.localeCompare(b.root));
+    const bindingIds = await readBindingIdsFromIndex(client, config);
+    const rows = await Promise.all(
+      bindingIds.map((id) => client.queryByKey({ schemaHash: sid, keyHash: id, fields: BIND_FIELDS })),
+    );
+    return rows
+      .filter((row): row is QueryRow => row !== null)
+      .map(rowToBinding)
+      .sort((a, b) => a.root.localeCompare(b.root));
   } catch {
     return [];
   }

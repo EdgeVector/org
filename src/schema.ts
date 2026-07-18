@@ -225,13 +225,130 @@ export const pathBindingSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Thin list-view index over local Organization records (single row per node).
+ * Lets `org list` / admin-slice point-read a slug set instead of scanning
+ * every Organization row (design: design-lastdb-scan-deprecation-path).
+ */
+export const orgIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "OrgIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Organization Index",
+    purpose_statement:
+      "Point-read list view of every Organization slug known to this node, maintained on write",
+    schema_type: "Hash",
+    key: { hash_field: "scope" },
+    fields: ["scope", "org_slugs", "updated_at"],
+    field_types: {
+      scope: "String",
+      org_slugs: { Array: "String" },
+      updated_at: "String",
+    },
+    field_descriptions: {
+      scope: 'constant local-node scope key ("local")',
+      org_slugs: "every organization slug known to this node",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: {
+      scope: PUBLIC,
+      org_slugs: PUBLIC,
+      updated_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Thin list-view index over OrgDatabase records, partitioned by org_slug.
+ * Point-reading this by org_slug replaces a full OrgDatabase scan filtered
+ * client-side.
+ */
+export const orgDbIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "OrgDbIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Org Database Index",
+    purpose_statement:
+      "Point-read list view of OrgDatabase slugs per organization, maintained on write",
+    schema_type: "Hash",
+    key: { hash_field: "org_slug" },
+    fields: ["org_slug", "db_slugs", "updated_at"],
+    field_types: {
+      org_slug: "String",
+      db_slugs: { Array: "String" },
+      updated_at: "String",
+    },
+    field_descriptions: {
+      org_slug: "parent organization slug (partition key)",
+      db_slugs: "every database slug under this org known to this node",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: {
+      org_slug: PUBLIC,
+      db_slugs: PUBLIC,
+      updated_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Thin list-view index over local PathBinding records (single row per node).
+ * `resolveHandle` runs on every `org run`/`org kanban …` dispatch, so this is
+ * the hottest of the three scans this design replaces.
+ */
+export const pathBindingIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "PathBindingIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Path Binding Index",
+    purpose_statement:
+      "Point-read list view of every PathBinding id known to this node, maintained on write",
+    schema_type: "Hash",
+    key: { hash_field: "scope" },
+    fields: ["scope", "binding_ids", "updated_at"],
+    field_types: {
+      scope: "String",
+      binding_ids: { Array: "String" },
+      updated_at: "String",
+    },
+    field_descriptions: {
+      scope: 'constant local-node scope key ("local")',
+      binding_ids: "every path binding id known to this node",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: {
+      scope: PUBLIC,
+      binding_ids: PUBLIC,
+      updated_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export const ALL_SCHEMAS: AddSchemaRequest[] = [
   organizationSchema,
   orgDatabaseSchema,
   pathBindingSchema,
+  orgIndexSchema,
+  orgDbIndexSchema,
+  pathBindingIndexSchema,
 ];
 
-export type SchemaKind = "Organization" | "OrgDatabase" | "PathBinding";
+export type SchemaKind =
+  | "Organization"
+  | "OrgDatabase"
+  | "PathBinding"
+  | "OrgIndex"
+  | "OrgDbIndex"
+  | "PathBindingIndex";
+
+/** Constant hash key for the single-row per-node indexes (OrgIndex, PathBindingIndex). */
+export const INDEX_SCOPE = "local";
 
 export function assertSlug(slug: string, label = "slug"): string {
   if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(slug)) {
