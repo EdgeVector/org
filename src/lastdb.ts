@@ -82,7 +82,7 @@ export type LastDbClient = {
     keyHash: string;
     fields: string[];
   }): Promise<QueryRow | null>;
-  queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryRow[]>;
+  queryAll(opts: { schemaHash: string; fields: string[]; allowFullScan?: boolean }): Promise<QueryRow[]>;
 };
 
 export class OrgError extends Error {
@@ -331,9 +331,16 @@ export function newLastDbClient(opts: {
       const rows = result.rows.map(sdkRowToQueryRow);
       return rows.find((row) => row.key.hash === keyHash) ?? null;
     },
-    async queryAll({ schemaHash, fields }) {
+    async queryAll({ schemaHash, fields, allowFullScan }) {
       const result = await sdkDataPath((client) =>
-        client.queryAll(schemaHash, { fields }, { pageSize: QUERY_PAGE_SIZE, allowFullScan: true }),
+        client.queryAll(
+          schemaHash,
+          { fields },
+          {
+            pageSize: QUERY_PAGE_SIZE,
+            ...(allowFullScan === true ? { allowFullScan: true } : {}),
+          } as { pageSize: number; allowFullScan?: boolean },
+        ),
       );
       return result.rows.map(sdkRowToQueryRow);
     },

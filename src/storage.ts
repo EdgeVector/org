@@ -287,7 +287,7 @@ export async function listOrganizations(
   const slugs = await readOrgSlugsFromIndex(client, config);
   if (slugs === null) {
     // Pre-index configs / unit tests: explicit admin full scan of the tiny org set.
-    const rows = await client.queryAll({ schemaHash: sid, fields: ORG_FIELDS });
+    const rows = await client.queryAll({ schemaHash: sid, fields: ORG_FIELDS, allowFullScan: true });
     return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
   }
   const rows = await Promise.all(
@@ -356,7 +356,7 @@ export async function listOrgDatabases(
 ): Promise<OrgDatabase[]> {
   const sid = schemaId(config, "OrgDatabase");
   if (!hasSchemaBinding(config, "OrgDbIndex")) {
-    const rows = await client.queryAll({ schemaHash: sid, fields: DB_FIELDS });
+    const rows = await client.queryAll({ schemaHash: sid, fields: DB_FIELDS, allowFullScan: true });
     let dbs = rows.map(rowToDb);
     if (orgSlug) dbs = dbs.filter((d) => d.orgSlug === assertSlug(orgSlug, "org slug"));
     return dbs.sort((a, b) => a.dbId.localeCompare(b.dbId));
