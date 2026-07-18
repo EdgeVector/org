@@ -97,10 +97,24 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
   const schemasRaw = r.schemas as Record<string, unknown>;
   const schemas = {} as Config["schemas"];
-  for (const kind of ["Organization", "OrgDatabase", "PathBinding"] as const) {
+  const OPTIONAL_KINDS: SchemaKind[] = [
+    "PathBinding",
+    "OrgIndex",
+    "OrgDbIndex",
+    "PathBindingIndex",
+  ];
+  for (const kind of [
+    "Organization",
+    "OrgDatabase",
+    "PathBinding",
+    "OrgIndex",
+    "OrgDbIndex",
+    "PathBindingIndex",
+  ] as const) {
     const entry = schemasRaw[kind];
-    if (kind === "PathBinding" && (entry === undefined || entry === null)) {
-      // Optional until re-init; bind will ask to re-run org init.
+    if (OPTIONAL_KINDS.includes(kind) && (entry === undefined || entry === null)) {
+      // Optional until re-init; scan-replacement index reads fall back to
+      // empty results, and index-only writes ask to re-run org init.
       continue;
     }
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
