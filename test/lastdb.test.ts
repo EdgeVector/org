@@ -69,6 +69,7 @@ describe("LastDB client headers", () => {
       await client.queryAll({
         schemaHash: "org/Organization",
         fields: ["slug"],
+        allowFullScan: true,
       });
 
       expect(capturedHeaders["x-lastdb-client"]).toBe("org");
