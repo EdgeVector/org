@@ -57,7 +57,7 @@ const config: Config = {
   nodeUrl: "http://localhost:9001",
   userHash: "u1",
   schemas: {
-    // Data path uses schemaName (namespaced) when present.
+    // Data path prefers catalog schemaHash (identity) over namespaced app name.
     Organization: { schemaHash: "hash-org", schemaName: "org/Organization" },
     OrgDatabase: { schemaHash: "hash-db", schemaName: "org/OrgDatabase" },
   },
@@ -113,7 +113,7 @@ describe("org storage", () => {
     });
 
     expect(org.defaultDb).toBe("company");
-    const stored = client.store.get("org/Organization::legacy");
+    const stored = client.store.get("hash-org::legacy");
     expect(stored?.fields.default_db).toBeUndefined();
   });
 

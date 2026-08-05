@@ -20,16 +20,19 @@ import {
 } from "./schema.ts";
 
 /**
- * Mini's data path resolves app schemas by namespaced name (`org/Organization`),
- * not by identity_hash alone (unlike some dual-registered hashes that also
- * appear as `name`). Prefer schemaName for mutate/query.
+ * Data-path identity for mutate/query.
+ *
+ * Prefer the catalog `schemaHash` returned by declare. On current Mini, the
+ * namespaced app name (`org/Organization`) often 404s with
+ * "App schema not loaded" right after declare, while the identity hash is
+ * already queryable. Name aliases may appear later; hash is the reliable bind.
  */
 function schemaId(config: Config, kind: SchemaKind): string {
   const binding = schemaBinding(config, kind);
-  if (binding.schemaName && binding.schemaName.includes("/")) {
-    return binding.schemaName;
+  if (binding.schemaHash && binding.schemaHash.length > 0) {
+    return binding.schemaHash;
   }
-  return binding.schemaHash;
+  return binding.schemaName;
 }
 
 function hasSchemaBinding(config: Config, kind: SchemaKind): boolean {

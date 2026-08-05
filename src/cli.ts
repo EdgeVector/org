@@ -270,10 +270,11 @@ async function cmdCreate(
   const { client, config } = await loadSession(opts, deps);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
 
+  // Prefer catalog identity hash — same rule as storage.schemaId (app names
+  // often 404 "not loaded" on a freshly declared ephemeral Mini).
   const orgSchemaId =
-    config.schemas.Organization.schemaName?.includes("/")
-      ? config.schemas.Organization.schemaName
-      : config.schemas.Organization.schemaHash;
+    config.schemas.Organization.schemaHash ||
+    config.schemas.Organization.schemaName;
   const existing = await client
     .queryByKey({
       schemaHash: orgSchemaId,

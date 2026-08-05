@@ -231,18 +231,21 @@ export function newLastDbClient(opts: {
       return { userHash };
     },
     async declareAppSchema(appId, schema) {
+      // Supported app-facing path (sop-register-app-schemas-on-lastdb-node):
+      // Mini POST /api/apps/declare-schema. Fall back to /api/schemas/declare
+      // only when the apps route is missing (older Mini).
       let body: unknown;
       try {
-        body = await callJson("/api/schemas/declare", "POST", {
-          namespace: appId,
+        body = await callJson("/api/apps/declare-schema", "POST", {
+          app_id: appId,
           schema,
         });
       } catch (err) {
         if (!(err instanceof OrgError) || err.code !== "node_http_404") {
           throw err;
         }
-        body = await callJson("/api/apps/declare-schema", "POST", {
-          app_id: appId,
+        body = await callJson("/api/schemas/declare", "POST", {
+          namespace: appId,
           schema,
         });
       }
@@ -252,6 +255,18 @@ export function newLastDbClient(opts: {
         throw new OrgError(
           "schema_declare_bad_response",
           `LastDB did not return a canonical hash for ${appId}/${schema.name}.`,
+        );
+      }
+      // Fail closed when Mini reports the catalog identity is not bindable yet.
+      if (
+        typeof body === "object" &&
+        body !== null &&
+        "bind_eligible" in body &&
+        (body as { bind_eligible?: unknown }).bind_eligible === false
+      ) {
+        throw new OrgError(
+          "schema_not_bind_eligible",
+          `LastDB refused to bind ${appId}/${schema.name} (bind_eligible=false; canonical=${canonical}).`,
         );
       }
       return { canonical, schemaName };
