@@ -1,21 +1,53 @@
 # Invite a friend to your LastDB org
 
-**Preferred path:** friend installs LastDB → shows their public key → you seal
+**Preferred path:** friend installs LastDB + Org → shows a public key → you seal
 the org key to that key → they join. The sealed package may travel on any clear
-channel (email/Slack). Friend does **not** need an Exemem account.
+channel (email/Slack/Signal). Friend does **not** need an Exemem account.
 
-Only the org admin needs Exemem for cloud-admin features. Identity for invite is
-just a **public key** (`orgpk1:…`).
+Only optional cloud/admin features need an Exemem account later. Invite identity
+is just a **public key** (`orgpk1:…`).
 
 ---
 
-## Handshake (both need LastDB + org)
+## Prerequisites (both machines)
 
-### 1) You → friend: public install link
+| Need | How |
+|------|-----|
+| macOS Apple Silicon | — |
+| Bun | https://bun.sh |
+| LastDB Mini running | `brew install edgevector/lastdb/lastdb` + `brew services start lastdb` |
+| LastSecrets | https://github.com/EdgeVector/lastsecrets — `bun link` + `lastsecrets init` |
+| Org | https://github.com/EdgeVector/org — `bun link` + `org init` |
+
+**Recommended one-shot** (installs org + lastsecrets + other apps):
+
+```bash
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+git clone https://github.com/EdgeVector/last-stack ~/.last-stack
+~/.last-stack/setup
+~/.last-stack/bin/last-stack-install-apps
+brew services start lastdb
+lastsecrets init
+org init
+```
+
+Health check (path is `/health`, not `/api/health`):
+
+```bash
+curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
+# expect: {"status":"ok"}
+```
+
+---
+
+## Preferred handshake
+
+### 1) You → friend: install pointer
 
 ```text
 Install LastDB + apps (includes org):
-  see https://thelastdb.com/llms.txt  or  last-stack-install-apps
+  https://thelastdb.com/llms.txt
+  or: last-stack-install-apps from https://github.com/EdgeVector/last-stack
 No Exemem account needed.
 ```
 
@@ -23,23 +55,27 @@ No Exemem account needed.
 
 ```bash
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-lastsecrets init
-org init
+lastsecrets init   # once per machine
+org init           # once per machine
 org receive
 ```
 
-Friend copies the `orgpk1:…` line (and optional fingerprint) back to you.
+Friend copies the **`orgpk1:…`** line (and optional fingerprint) back to you.
+Safe on any channel.
 
-### 3) You: seal to their public key
+### 3) You: create org (once) + seal to their key
 
 ```bash
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-# once: lastsecrets init && org init && org create friends --name "Friends"
+# once:
+#   lastsecrets init && org init
+#   org create friends --name "Friends"
 
 org invite friends --to 'orgpk1:PASTE_THEIR_KEY' --agent
 ```
 
-Copy the printed agent text / `orgseal1:…` package to the friend over any channel.
+Copy the printed **`orgseal1:…`** package (and agent instructions if helpful)
+to the friend over any channel. Clear-channel safe — encrypted to their key.
 
 ### 4) Friend: join
 
@@ -49,7 +85,8 @@ org join --sealed 'orgseal1:PASTE_PACKAGE'
 org show friends
 ```
 
-Must use the **same machine** that ran `org receive` (same local private key).
+**Must use the same machine** that ran `org receive` (same local private key
+under `~/.org/`).
 
 ---
 
@@ -64,7 +101,7 @@ org invite friends --out ~/Desktop/friends.invite.json --agent
 org join --from ~/Downloads/friends.invite.json
 ```
 
-Never paste invite JSON into email/chat.
+Never paste invite JSON into email/chat. Delete the file after join.
 
 ---
 
@@ -87,16 +124,36 @@ embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 - Kick someone: **rotate** the org E2E key and re-invite remaining pubkeys
   (shared-secret model — deleting a name does nothing if they still have the key).
 - Names/People mapping is out of band (or a future People app), not required here.
+- Continuous multi-device **data** sync is separate: membership hands out keys;
+  Mini cloud sync (`cloud_sync.json` / `lastdb connect`) is what converges
+  encrypted org logs across machines.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `command not found: org` | `export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"`; re-run install / `bun link` in the org checkout |
+| `App schema not loaded` / missing schema | Re-run `org init` on a current Mini (`brew upgrade lastdb` / Last Stack install) |
+| `join --sealed` fails after `receive` on another laptop | Sealed packages bind to the **receive** keypair; re-run `org receive` on the join machine and re-invite |
+| `org show` works but friend never sees your writes | Cloud sync not enabled on both nodes — membership alone is local; see Mini cloud sync docs |
+| Health check fails | `brew services start lastdb`; socket `~/.lastdb/data/folddb.sock` |
+
+---
 
 ## Dogfood (developers)
 
-The dogfood script boots two throwaway Mini homes and proves the preferred
-public-key sealed path end to end: friend `org receive`, admin
-`org invite --to orgpk1:... --agent`, friend `org join --sealed`, then
-`org show`.
+Boots two throwaway Mini homes and proves the preferred public-key path:
+friend `org receive` → admin `org invite --to orgpk1:… --agent` → friend
+`org join --sealed` → `org show`.
 
 ```bash
+# from an org checkout
 LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
+  # or: LS_CLI=~/.host-track/apps/lastsecrets/current/src/cli.ts
   scripts/invite-e2e-dogfood.sh
 # expect: VERDICT: GREEN
 ```
+
+Never points either home at the primary `~/.lastdb` brain.

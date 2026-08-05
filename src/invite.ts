@@ -340,6 +340,7 @@ lastsecrets init
 org init
 org receive
 # Send the printed orgpk1:… line to the admin, then wait for the sealed package.
+# Public docs: https://github.com/EdgeVector/org/blob/main/docs/INVITE.md
 \`\`\`
 
 ## 3) Join with the sealed package
