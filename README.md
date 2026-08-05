@@ -187,6 +187,26 @@ Resolution order: **explicit `--db` → cwd under a bound root (longest prefix)
 
 ---
 
+## Cloud membership (kick without key rotation)
+
+Live download/upload of an org cloud head is gated by **Exemem principal
+membership** (registry on the head id), not by possession of the shared E2E key.
+
+```bash
+# after friend joins locally, grant their Mini user_hash live cloud access:
+org member grant edgevector <their_user_hash> --role writer
+
+# kick — they keep local data + E2E key, but cloud presigns stop:
+org member revoke edgevector <their_user_hash>
+
+# leave yourself:
+org member leave edgevector
+```
+
+Requires a Mini with cloud sync enabled and a storage_service build that
+implements `register_db_member` / `unregister_db_member`. Create/join still
+stores the E2E key in LastSecrets either way.
+
 ## What works today vs later
 
 | Works now | Needs more setup / later |

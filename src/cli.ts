@@ -70,8 +70,10 @@ import {
   toResolveBindings,
 } from "./storage.ts";
 import {
+  grantOrgCloudMember,
   listOrgCloudSyncTargets,
   registerOrgCloudSync,
+  revokeOrgCloudMember,
   type OrgSyncRegisterResult,
 } from "./org-sync.ts";
 import { isMetaCommand, usageWrapperLine, wrapApp } from "./wrapper.ts";
@@ -159,6 +161,10 @@ export async function run(
 
     if (command === "sync") {
       return await cmdSync(arg, tail, io, deps);
+    }
+
+    if (command === "member") {
+      return await cmdMember(arg, tail, io, deps);
     }
 
     if (command === "db") {
@@ -608,6 +614,87 @@ async function armOrgCloudSync(input: {
   }
 }
 
+/**
+ * Cloud live-access membership (Exemem principal registry on the org head).
+ * Does not rotate the shared E2E key — kick only stops download/upload of new
+ * cloud bytes for that user.
+ *
+ *   org member grant <slug> <user_hash> [--role writer|reader]
+ *   org member revoke <slug> <user_hash>
+ *   org member leave <slug>
+ */
+async function cmdMember(
+  sub: string | undefined,
+  rest: string[],
+  io: Io,
+  deps: CliDeps,
+): Promise<number> {
+  if (!sub || sub === "help" || sub === "--help") {
+    io.stdout.write(
+      "org member grant <slug> <user_hash> [--role writer|reader]\n" +
+        "org member revoke <slug> <user_hash>\n" +
+        "org member leave <slug>\n",
+    );
+    return 0;
+  }
+  const opts = parseOptions(rest);
+  if (sub === "grant") {
+    const slug = rest[0];
+    const userHash = rest[1];
+    if (!slug || !userHash) {
+      throw new Error("usage: org member grant <slug> <user_hash> [--role writer|reader]");
+    }
+    const grantOpts = parseOptions(rest.slice(2));
+    const { client, config } = await loadSession(grantOpts, deps);
+    const org = await getOrganization(client, config, slug);
+    const role = grantOpts.role ?? "writer";
+    const result = await grantOrgCloudMember({
+      orgHash: org.orgHash,
+      targetUserHash: userHash,
+      role,
+      socketPath: grantOpts.socketPath ?? config.nodeSocketPath,
+    });
+    if (!result.ok) throw new Error(result.error ?? "grant failed");
+    io.stdout.write(
+      `granted cloud access org=${slug} principal=${result.principal_hash ?? userHash} role=${result.role ?? role}\n`,
+    );
+    return 0;
+  }
+  if (sub === "revoke") {
+    const slug = rest[0];
+    const userHash = rest[1];
+    if (!slug || !userHash) {
+      throw new Error("usage: org member revoke <slug> <user_hash>");
+    }
+    const revOpts = parseOptions(rest.slice(2));
+    const { client, config } = await loadSession(revOpts, deps);
+    const org = await getOrganization(client, config, slug);
+    const result = await revokeOrgCloudMember({
+      orgHash: org.orgHash,
+      targetUserHash: userHash,
+      socketPath: revOpts.socketPath ?? config.nodeSocketPath,
+    });
+    if (!result.ok) throw new Error(result.error ?? "revoke failed");
+    io.stdout.write(`revoked cloud access org=${slug} principal=${userHash}\n`);
+    return 0;
+  }
+  if (sub === "leave") {
+    const slug = rest[0];
+    if (!slug) throw new Error("usage: org member leave <slug>");
+    const leaveOpts = parseOptions(rest.slice(1));
+    const { client, config } = await loadSession(leaveOpts, deps);
+    const org = await getOrganization(client, config, slug);
+    const result = await revokeOrgCloudMember({
+      orgHash: org.orgHash,
+      socketPath: leaveOpts.socketPath ?? config.nodeSocketPath,
+    });
+    if (!result.ok) throw new Error(result.error ?? "leave failed");
+    io.stdout.write(`left cloud membership for org=${slug} (local E2E key unchanged)\n`);
+    return 0;
+  }
+  throw new Error(`unknown member subcommand: ${sub}`);
+}
+
 async function cmdSync(
   sub: string | undefined,
   rest: string[],
@@ -949,6 +1036,8 @@ type Options = {
   cwd?: string;
   defaultDb?: string;
   json?: boolean;
+  /** Registry role for `org member grant` (`writer` | `reader`). */
+  role?: string;
 };
 
 type ResolveFlags = {
@@ -1063,6 +1152,9 @@ function parseOptions(args: string[]): Options {
       case "--json":
         opts.json = true;
         break;
+      case "--role":
+        opts.role = next();
+        break;
       case undefined:
         break;
       default:
@@ -1111,6 +1203,9 @@ Other:
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
+  org member grant <slug> <user_hash> [--role writer|reader]
+  org member revoke <slug> <user_hash>         # kick: stop their live cloud sync (no E2E rotate)
+  org member leave <slug>                      # self-revoke cloud membership
   org admin-slice                              # metadata-only JSON for admin delivery
   org schema-json
   org help

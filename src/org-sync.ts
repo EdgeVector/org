@@ -141,6 +141,84 @@ export async function registerOrgCloudSync(input: {
   }
 }
 
+/** Owner grants another Exemem principal live cloud access to the org head. */
+export async function grantOrgCloudMember(input: {
+  orgHash: string;
+  targetUserHash: string;
+  role?: string;
+  socketPath?: string;
+}): Promise<{ ok: boolean; error?: string; role?: string; principal_hash?: string }> {
+  try {
+    const { status, json } = await udsJson(
+      "POST",
+      "/api/org/sync/grant-member",
+      {
+        org_hash: input.orgHash,
+        target_user_hash: input.targetUserHash,
+        role: input.role ?? "writer",
+      },
+      input.socketPath,
+    );
+    if (status === 404) {
+      return {
+        ok: false,
+        error:
+          "node does not support /api/org/sync/grant-member yet (upgrade lastdbd)",
+      };
+    }
+    const data = unwrapEnvelope(json);
+    if (status >= 400 || data.ok === false) {
+      return {
+        ok: false,
+        error: String(data.error ?? data.message ?? `HTTP ${status}`),
+      };
+    }
+    return {
+      ok: true,
+      role: typeof data.role === "string" ? data.role : undefined,
+      principal_hash:
+        typeof data.principal_hash === "string" ? data.principal_hash : undefined,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Owner kicks target, or omit target / pass self to leave. */
+export async function revokeOrgCloudMember(input: {
+  orgHash: string;
+  targetUserHash?: string;
+  socketPath?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const body: Record<string, string> = { org_hash: input.orgHash };
+    if (input.targetUserHash) body.target_user_hash = input.targetUserHash;
+    const { status, json } = await udsJson(
+      "POST",
+      "/api/org/sync/revoke-member",
+      body,
+      input.socketPath,
+    );
+    if (status === 404) {
+      return {
+        ok: false,
+        error:
+          "node does not support /api/org/sync/revoke-member yet (upgrade lastdbd)",
+      };
+    }
+    const data = unwrapEnvelope(json);
+    if (status >= 400 || data.ok === false) {
+      return {
+        ok: false,
+        error: String(data.error ?? data.message ?? `HTTP ${status}`),
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function listOrgCloudSyncTargets(opts?: {
   socketPath?: string;
 }): Promise<OrgSyncTargetsResult> {
