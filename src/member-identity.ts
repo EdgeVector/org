@@ -8,20 +8,35 @@ import {
   createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
+  sign as cryptoSign,
+  verify as cryptoVerify,
   type KeyObject,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const MEMBER_PUBKEY_PREFIX = "orgpk1:" as const;
 
-export type MemberSealIdentity = {
+export type MemberSealIdentityV1 = {
   version: 1;
   /** Base64 SPKI DER (X25519). */
   public_key: string;
   /** Base64 PKCS8 DER (X25519). */
   private_key: string;
+  created_at: string;
+};
+
+export type MemberSealIdentity = {
+  version: 2;
+  /** Base64 SPKI DER (X25519). */
+  public_key: string;
+  /** Base64 PKCS8 DER (X25519). */
+  private_key: string;
+  /** Base64 SPKI DER (Ed25519). */
+  signing_public_key: string;
+  /** Base64 PKCS8 DER (Ed25519). */
+  signing_private_key: string;
   created_at: string;
 };
 
@@ -89,13 +104,22 @@ export function isMemberPubkey(input: string): boolean {
 }
 
 export function generateMemberSealIdentity(): MemberSealIdentity {
-  const { publicKey, privateKey } = generateKeyPairSync("x25519");
-  const pubDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
-  const privDer = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const seal = generateKeyPairSync("x25519");
+  const signing = generateKeyPairSync("ed25519");
   return {
-    version: 1,
-    public_key: pubDer.toString("base64"),
-    private_key: privDer.toString("base64"),
+    version: 2,
+    public_key: seal.publicKey
+      .export({ type: "spki", format: "der" })
+      .toString("base64"),
+    private_key: seal.privateKey
+      .export({ type: "pkcs8", format: "der" })
+      .toString("base64"),
+    signing_public_key: signing.publicKey
+      .export({ type: "spki", format: "der" })
+      .toString("base64"),
+    signing_private_key: signing.privateKey
+      .export({ type: "pkcs8", format: "der" })
+      .toString("base64"),
     created_at: new Date().toISOString(),
   };
 }
@@ -112,8 +136,30 @@ export function loadOrCreateMemberIdentity(
 }
 
 export function loadMemberIdentity(path = defaultMemberIdentityPath()): MemberSealIdentity {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as MemberSealIdentity;
-  if (raw.version !== 1 || !raw.public_key || !raw.private_key) {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as
+    | MemberSealIdentityV1
+    | MemberSealIdentity;
+  if (!raw.public_key || !raw.private_key || !raw.created_at) {
+    throw new Error(`invalid member identity file: ${path}`);
+  }
+  if (raw.version === 1) {
+    const signing = generateKeyPairSync("ed25519");
+    const migrated: MemberSealIdentity = {
+      version: 2,
+      public_key: raw.public_key,
+      private_key: raw.private_key,
+      signing_public_key: signing.publicKey
+        .export({ type: "spki", format: "der" })
+        .toString("base64"),
+      signing_private_key: signing.privateKey
+        .export({ type: "pkcs8", format: "der" })
+        .toString("base64"),
+      created_at: raw.created_at,
+    };
+    saveMemberIdentity(migrated, path);
+    return migrated;
+  }
+  if (raw.version !== 2 || !raw.signing_public_key || !raw.signing_private_key) {
     throw new Error(`invalid member identity file: ${path}`);
   }
   return raw;
@@ -128,6 +174,7 @@ export function saveMemberIdentity(
     encoding: "utf8",
     mode: 0o600,
   });
+  chmodSync(path, 0o600);
 }
 
 export function memberPublicKeyObject(id: MemberSealIdentity): KeyObject {
@@ -144,6 +191,124 @@ export function memberPrivateKeyObject(id: MemberSealIdentity): KeyObject {
     format: "der",
     type: "pkcs8",
   });
+}
+
+export function memberSigningPublicKeyObject(id: MemberSealIdentity): KeyObject {
+  return createPublicKey({
+    key: Buffer.from(id.signing_public_key, "base64"),
+    format: "der",
+    type: "spki",
+  });
+}
+
+export function memberSigningPrivateKeyObject(id: MemberSealIdentity): KeyObject {
+  return createPrivateKey({
+    key: Buffer.from(id.signing_private_key, "base64"),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+function assertUnicodeScalarString(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        throw new TypeError("JCS payload contains an unpaired Unicode surrogate");
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new TypeError("JCS payload contains an unpaired Unicode surrogate");
+    }
+  }
+}
+
+/** Canonical JSON following RFC 8785's ECMAScript serialization rules. */
+export function canonicalizeJcs(payload: unknown): string {
+  const active = new Set<object>();
+
+  const serialize = (value: unknown): string => {
+    if (value === null) return "null";
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw new TypeError("JCS payload numbers must be finite");
+      }
+      return JSON.stringify(value);
+    }
+    if (typeof value === "string") {
+      assertUnicodeScalarString(value);
+      return JSON.stringify(value);
+    }
+    if (typeof value !== "object") {
+      throw new TypeError(`JCS payload cannot contain ${typeof value}`);
+    }
+    if (active.has(value)) {
+      throw new TypeError("JCS payload cannot contain cycles");
+    }
+
+    active.add(value);
+    try {
+      if (Array.isArray(value)) {
+        const items: string[] = [];
+        for (let index = 0; index < value.length; index += 1) {
+          if (!(index in value)) {
+            throw new TypeError("JCS payload arrays cannot contain holes");
+          }
+          items.push(serialize(value[index]));
+        }
+        return `[${items.join(",")}]`;
+      }
+
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError("JCS payload objects must be plain JSON objects");
+      }
+      const object = value as Record<string, unknown>;
+      const keys = Object.keys(object).sort();
+      const fields = keys.map((key) => {
+        assertUnicodeScalarString(key);
+        return `${JSON.stringify(key)}:${serialize(object[key])}`;
+      });
+      return `{${fields.join(",")}}`;
+    } finally {
+      active.delete(value);
+    }
+  };
+
+  return serialize(payload);
+}
+
+export function signMemberPayload(id: MemberSealIdentity, payload: unknown): string {
+  const message = Buffer.from(canonicalizeJcs(payload), "utf8");
+  return cryptoSign(null, message, memberSigningPrivateKeyObject(id)).toString(
+    "base64url",
+  );
+}
+
+export function verifyMemberPayload(
+  signingPublicKey: string | KeyObject,
+  payload: unknown,
+  signature: string,
+): boolean {
+  const message = Buffer.from(canonicalizeJcs(payload), "utf8");
+  let signatureBytes: Buffer;
+  try {
+    signatureBytes = Buffer.from(signature, "base64url");
+    if (signatureBytes.length !== 64) return false;
+    const publicKey =
+      typeof signingPublicKey === "string"
+        ? createPublicKey({
+            key: Buffer.from(signingPublicKey, "base64"),
+            format: "der",
+            type: "spki",
+          })
+        : signingPublicKey;
+    return cryptoVerify(null, message, publicKey, signatureBytes);
+  } catch {
+    return false;
+  }
 }
 
 export function memberPubkeyLine(id: MemberSealIdentity): string {
