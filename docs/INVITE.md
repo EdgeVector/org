@@ -80,13 +80,39 @@ to the friend over any channel. Clear-channel safe — encrypted to their key.
 ### 4) Friend: join
 
 ```bash
-org join --sealed 'orgseal1:PASTE_PACKAGE'
+org join --sealed 'orgseal1:PASTE_PACKAGE' [--member-name "Your Name"]
 # or: org receive --sealed 'orgseal1:…'
 org show friends
 ```
 
 **Must use the same machine** that ran `org receive` (same local private key
 under `~/.org/`).
+
+Invites expire (default 72h; admin sets `--expires-in 30m|72h|14d`). An
+expired invite is rejected at join with nothing stored — ask for a fresh one.
+
+### 5) Friend → admin: send back the acceptance
+
+`org join` prints a line starting with `acceptance=orgaccept1:…`. Send that
+full token back to the admin over any channel — it contains no secrets (it is
+encrypted with the org key and self-signed by your member identity).
+
+### 6) Admin: mint the membership epoch
+
+```bash
+org member add friends --accept 'orgaccept1:PASTE_TOKEN' [--role member]
+org member list friends
+```
+
+Membership lands **only** as an owner-signed epoch in the org's registry
+chain — there is no mutable member row. Each acceptance is one-time: a
+replayed token is rejected and no epoch is minted. To remove someone from the
+registry later:
+
+```bash
+org kick friends <member_id>       # revocation epoch (non-retroactive)
+org member revoke friends <hash>   # separate lever: stop their live cloud sync
+```
 
 ---
 

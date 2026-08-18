@@ -28,10 +28,18 @@ import {
   buildClaimAgentInstructions,
   buildInvite,
   buildPubkeySealedAgentInstructions,
+  inviteExpired,
   newInviteClaimId,
   parseInvite,
   serializeInvite,
+  type OrgInvite,
 } from "./invite.ts";
+import {
+  buildJoinAccept,
+  joinAcceptExpired,
+  sealJoinAccept,
+  unsealJoinAccept,
+} from "./join-accept.ts";
 import {
   isPubkeySealedPackage,
   sealInviteToPubkey,
@@ -69,6 +77,7 @@ import {
   buildAdminOrgSlice,
   formatDb,
   formatOrg,
+  getConsumedInviteClaim,
   getOrgDatabase,
   getOrgEpoch,
   getOrganization,
@@ -76,13 +85,16 @@ import {
   listOrgEpochs,
   listOrganizations,
   listPathBindings,
+  putConsumedInviteClaim,
   putOrgEpoch,
   putOrganization,
   putOrgDatabase,
   putPathBinding,
   removePathBinding,
   requireEpochBindings,
+  requireInviteClaimBinding,
   toResolveBindings,
+  updateConsumedInviteClaim,
   type Organization,
 } from "./storage.ts";
 import {
@@ -185,6 +197,10 @@ export async function run(
 
     if (command === "epoch") {
       return await cmdEpoch(arg, tail, io, deps);
+    }
+
+    if (command === "kick") {
+      return await cmdKick(arg, tail, io, deps);
     }
 
     if (command === "db") {
@@ -438,7 +454,11 @@ async function cmdInvite(
     orgPublicKey: org.orgPublicKey,
     e2eKey,
     createdBy: config.userHash,
+    ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
   });
+  io.stderr.write(
+    `invite expires_at=${invite.expires_at} (one-time claim; admin accepts with org member add)\n`,
+  );
   if (opts.to && opts.out) {
     throw new Error("invite --to cannot be combined with --out; use one delivery path");
   }
@@ -579,7 +599,7 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     throw new Error("join accepts only one of --from, --sealed, or --claim");
   }
 
-  let invite;
+  let invite: OrgInvite;
   if (opts.sealed) {
     const id = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
     invite = unsealAnyInvite(opts.sealed, memberPrivateKeyObject(id));
@@ -597,6 +617,14 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     }
   } else {
     invite = parseInvite(JSON.parse(readFileSync(opts.from!, "utf8")));
+  }
+
+  // Expiry gate BEFORE any local write: an expired invite stores nothing and
+  // mints nothing.
+  if (inviteExpired(invite)) {
+    throw new Error(
+      `invite for ${invite.slug} expired at ${invite.expires_at}; ask the admin for a fresh invite`,
+    );
   }
 
   const { client, config } = await loadSession(opts, deps);
@@ -631,6 +659,32 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     socketPath: opts.socketPath ?? config.nodeSocketPath,
     io,
   });
+
+  // Sealed return channel: hand back our v2 signing identity so the OWNER can
+  // mint the membership epoch. Membership lands only as a signed epoch — this
+  // node holds the e2e key now, but is not in the registry until accepted.
+  if (invite.claim_nonce) {
+    const identity = loadOrCreateMemberIdentity(
+      opts.identityPath ?? defaultMemberIdentityPath(),
+    );
+    const accept = buildJoinAccept({
+      invite,
+      identity,
+      ...(opts.memberName !== undefined ? { memberName: opts.memberName } : {}),
+    });
+    const token = sealJoinAccept(accept, invite.e2e_key);
+    io.stdout.write(
+      `\nSend this acceptance back to the org admin over any channel (it contains no secrets):\n`,
+    );
+    io.stdout.write(`acceptance=${token}\n`);
+    io.stdout.write(
+      `admin runs: org member add ${invite.slug} --accept '${token.slice(0, 24)}…'  (full token)\n`,
+    );
+  } else {
+    io.stderr.write(
+      "note: invite carried no claim_nonce (older CLI); you joined locally but the admin must mint your registry epoch from a fresh invite\n",
+    );
+  }
   return 0;
 }
 
@@ -681,9 +735,86 @@ async function cmdMember(
   if (!sub || sub === "help" || sub === "--help") {
     io.stdout.write(
       "org member list <slug> [--json]        # registry from the canonical signed epoch\n" +
+        "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]  # owner mints epoch N+1\n" +
         "org member grant <slug> <user_hash> [--role writer|reader]\n" +
         "org member revoke <slug> <user_hash>\n" +
         "org member leave <slug>\n",
+    );
+    return 0;
+  }
+  if (sub === "add") {
+    const slug = rest[0];
+    if (!slug) {
+      throw new Error(
+        "usage: org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]",
+      );
+    }
+    const addOpts = parseOptions(rest.slice(1));
+    if (!addOpts.accept) {
+      throw new Error(
+        "member add requires --accept 'orgaccept1:…' (printed by the joiner's `org join`)",
+      );
+    }
+    const { client, config } = await loadSession(addOpts, deps);
+    const org = await getOrganization(client, config, slug);
+    requireInviteClaimBinding(config);
+    const secrets = deps.lastSecrets ?? newLastSecretsCli();
+    const e2eKey = secrets.get(e2eSecretSlug(slug));
+    const accept = unsealJoinAccept(addOpts.accept, e2eKey);
+    if (accept.payload.org_hash !== org.orgHash) {
+      throw new Error("acceptance rejected: org_hash mismatch (token is for a different org)");
+    }
+    // Policy gates, in order — each rejects WITHOUT minting an epoch.
+    if (joinAcceptExpired(accept)) {
+      throw new Error(
+        `acceptance rejected: invite expired at ${accept.payload.expires_at}; no epoch minted`,
+      );
+    }
+    const spent = await getConsumedInviteClaim(client, config, accept.payload.claim_nonce);
+    if (spent) {
+      throw new Error(
+        `acceptance rejected: claim already consumed at ${spent.consumedAt} for member ${spent.memberId}; no epoch minted (replay)`,
+      );
+    }
+    const sealParsed = parseMemberPubkey(accept.payload.member.seal_pk);
+    const member: EpochMember = {
+      member_id: accept.payload.member.member_id,
+      name: addOpts.name ?? accept.payload.member.name,
+      sign_pk: accept.payload.member.sign_pk,
+      seal_pk: sealParsed.encoded,
+      roles: [addOpts.role ?? "member"],
+      status: "active",
+    };
+    // Burn the nonce BEFORE minting: a crash between the writes fails loudly
+    // on retry instead of leaving a replayable claim behind.
+    const consumedAt = new Date().toISOString();
+    await putConsumedInviteClaim(client, config, {
+      claimNonce: accept.payload.claim_nonce,
+      orgHash: org.orgHash,
+      memberId: member.member_id,
+      epochHash: "",
+      consumedAt,
+    });
+    const epoch = await mintNextEpoch({
+      client,
+      config,
+      org,
+      io,
+      deps,
+      apply: (members) => {
+        appendNewMember(members, member);
+        return { members };
+      },
+    });
+    await updateConsumedInviteClaim(client, config, {
+      claimNonce: accept.payload.claim_nonce,
+      orgHash: org.orgHash,
+      memberId: member.member_id,
+      epochHash: epoch.epoch_hash,
+      consumedAt,
+    });
+    io.stdout.write(
+      `added ${member.member_id} name=${JSON.stringify(member.name)} role=${member.roles[0]} — signed ${formatEpochSummary(epoch)}\n`,
     );
     return 0;
   }
@@ -807,66 +938,35 @@ async function cmdEpoch(
   const org = await getOrganization(client, config, slug);
 
   if (sub === "sign") {
-    const secrets = deps.lastSecrets ?? newLastSecretsCli();
-    const orgPrivateKey = secrets.get(`org-${slug}-private`);
-    const resolved = await loadEpochChain(client, config, org, io);
-    if (!resolved.ok || !resolved.tip) {
-      throw new Error(
-        `refusing to sign atop an unverifiable chain: ${resolved.error ?? "no canonical epoch"}`,
-      );
-    }
-    const tip = resolved.tip;
-    const members: EpochMember[] = tip.payload.members.map((m) => ({
-      ...m,
-      roles: m.roles.slice(),
-    }));
-
-    let changed = false;
-    if (opts.addMember) {
-      const added = parseMemberSpec(opts.addMember);
-      const clash = members.find((m) => m.member_id === added.member_id);
-      if (clash) {
-        throw new Error(
-          `member_id already present in the registry: ${added.member_id} (status=${clash.status})`,
-        );
-      }
-      members.push(added);
-      changed = true;
-    }
-    if (opts.revoke) {
-      const target = members.find((m) => m.member_id === opts.revoke);
-      if (!target) throw new Error(`member not found in registry: ${opts.revoke}`);
-      if (target.status === "revoked") {
-        throw new Error(`member already revoked: ${opts.revoke}`);
-      }
-      target.status = "revoked";
-      changed = true;
-    }
-    let repoAdmins = tip.payload.repo_admins;
-    if (opts.repoAdmins) {
-      repoAdmins = parseRepoAdmins(opts.repoAdmins);
-      changed = true;
-    }
-    if (!changed && !opts.force) {
-      throw new Error(
-        "no membership changes requested (use --add-member/--revoke/--repo-admins, or --force to re-sign as-is)",
-      );
-    }
-    if (!members.some((m) => m.status === "active" && m.roles.includes("owner"))) {
-      throw new Error("refusing to sign an epoch with no active owner");
-    }
-
-    const epoch = signEpochPayload(
-      buildEpochPayload({
-        orgHash: org.orgHash,
-        epochNo: tip.payload.epoch_no + 1,
-        prevEpoch: tip.epoch_hash,
-        members,
-        ...(repoAdmins !== undefined ? { repoAdmins } : {}),
-      }),
-      orgPrivateKey,
-    );
-    await putOrgEpoch(client, config, epoch);
+    const epoch = await mintNextEpoch({
+      client,
+      config,
+      org,
+      io,
+      deps,
+      apply: (members, tip) => {
+        let changed = false;
+        if (opts.addMember) {
+          appendNewMember(members, parseMemberSpec(opts.addMember));
+          changed = true;
+        }
+        if (opts.revoke) {
+          revokeMember(members, opts.revoke);
+          changed = true;
+        }
+        let repoAdmins = tip.payload.repo_admins;
+        if (opts.repoAdmins) {
+          repoAdmins = parseRepoAdmins(opts.repoAdmins);
+          changed = true;
+        }
+        if (!changed && !opts.force) {
+          throw new Error(
+            "no membership changes requested (use --add-member/--revoke/--repo-admins, or --force to re-sign as-is)",
+          );
+        }
+        return { members, repoAdmins };
+      },
+    });
     io.stdout.write(`signed ${formatEpochSummary(epoch)}\n`);
     return 0;
   }
@@ -962,6 +1062,112 @@ async function cmdEpoch(
   }
 
   throw new Error(`unknown epoch subcommand: ${sub}\n${epochUsage()}`);
+}
+
+/**
+ * The one epoch-mint path: resolve the verified canonical chain, apply a
+ * membership mutation, enforce the active-owner invariant, sign with the org
+ * root key, persist. `epoch sign`, `member add --accept`, and `kick` all
+ * mint through here — membership never lands any other way.
+ */
+async function mintNextEpoch(input: {
+  client: ReturnType<typeof newLastDbClient>;
+  config: Config;
+  org: Organization;
+  io: Io;
+  deps: CliDeps;
+  apply: (
+    members: EpochMember[],
+    tip: OrgEpoch,
+  ) => { members: EpochMember[]; repoAdmins?: Record<string, string[]> };
+}): Promise<OrgEpoch> {
+  const secrets = input.deps.lastSecrets ?? newLastSecretsCli();
+  const orgPrivateKey = secrets.get(`org-${input.org.slug}-private`);
+  const resolved = await loadEpochChain(input.client, input.config, input.org, input.io);
+  if (!resolved.ok || !resolved.tip) {
+    throw new Error(
+      `refusing to sign atop an unverifiable chain: ${resolved.error ?? "no canonical epoch"}`,
+    );
+  }
+  const tip = resolved.tip;
+  const working: EpochMember[] = tip.payload.members.map((m) => ({
+    ...m,
+    roles: m.roles.slice(),
+  }));
+  const applied = input.apply(working, tip);
+  const repoAdmins = applied.repoAdmins ?? tip.payload.repo_admins;
+  if (!applied.members.some((m) => m.status === "active" && m.roles.includes("owner"))) {
+    throw new Error("refusing to sign an epoch with no active owner");
+  }
+  const epoch = signEpochPayload(
+    buildEpochPayload({
+      orgHash: input.org.orgHash,
+      epochNo: tip.payload.epoch_no + 1,
+      prevEpoch: tip.epoch_hash,
+      members: applied.members,
+      ...(repoAdmins !== undefined ? { repoAdmins } : {}),
+    }),
+    orgPrivateKey,
+  );
+  await putOrgEpoch(input.client, input.config, epoch);
+  return epoch;
+}
+
+function appendNewMember(members: EpochMember[], added: EpochMember): void {
+  const clash = members.find((m) => m.member_id === added.member_id);
+  if (clash) {
+    throw new Error(
+      `member_id already present in the registry: ${added.member_id} (status=${clash.status})`,
+    );
+  }
+  members.push(added);
+}
+
+function revokeMember(members: EpochMember[], memberId: string): void {
+  const target = members.find((m) => m.member_id === memberId);
+  if (!target) throw new Error(`member not found in registry: ${memberId}`);
+  if (target.status === "revoked") {
+    throw new Error(`member already revoked: ${memberId}`);
+  }
+  target.status = "revoked";
+}
+
+/**
+ * Registry kick: mint a revocation epoch (status revoked, non-retroactive —
+ * events authorized by earlier epochs stay valid). Cloud transport kick is
+ * the separate `org member revoke` lever.
+ */
+async function cmdKick(
+  slug: string | undefined,
+  rest: string[],
+  io: Io,
+  deps: CliDeps,
+): Promise<number> {
+  const memberId = rest[0];
+  if (!slug || !memberId) {
+    throw new Error("usage: org kick <org-slug> <member_id>");
+  }
+  const opts = parseOptions(rest.slice(1));
+  const { client, config } = await loadSession(opts, deps);
+  const org = await getOrganization(client, config, slug);
+  const epoch = await mintNextEpoch({
+    client,
+    config,
+    org,
+    io,
+    deps,
+    apply: (members) => {
+      revokeMember(members, memberId);
+      return { members };
+    },
+  });
+  io.stdout.write(
+    `kicked ${memberId} from the ${org.slug} registry — signed ${formatEpochSummary(epoch)}\n`,
+  );
+  io.stdout.write(
+    `note: revocation is non-retroactive; to also stop their live cloud sync run: org member revoke ${org.slug} <user_hash>\n`,
+  );
+  return 0;
 }
 
 /** Load, filter, and verify the canonical chain; warn (stderr) on bad records. */
@@ -1430,7 +1636,25 @@ type Options = {
   repoAdmins?: string;
   /** Allow `epoch sign` with no membership changes (re-sign as-is). */
   force?: boolean;
+  /** Invite lifetime like 30s/15m/72h/14d for `org invite --expires-in`. */
+  expiresIn?: string;
+  /** Display name the joiner proposes for itself (`org join --member-name`). */
+  memberName?: string;
+  /** orgaccept1:… token for `org member add --accept`. */
+  accept?: string;
 };
+
+/** Parse 30s / 15m / 72h / 14d (ms allowed for tests) into milliseconds. */
+function parseDurationMs(spec: string): number {
+  const m = /^(\d+)(ms|s|m|h|d)$/.exec(spec.trim());
+  if (!m) {
+    throw new Error(`--expires-in must look like 30s, 15m, 72h, or 14d (got ${spec})`);
+  }
+  const n = Number(m[1]);
+  const mult =
+    m[2] === "ms" ? 1 : m[2] === "s" ? 1000 : m[2] === "m" ? 60_000 : m[2] === "h" ? 3_600_000 : 86_400_000;
+  return n * mult;
+}
 
 type ResolveFlags = {
   db?: string;
@@ -1562,6 +1786,15 @@ function parseOptions(args: string[]): Options {
       case "--force":
         opts.force = true;
         break;
+      case "--expires-in":
+        opts.expiresIn = next();
+        break;
+      case "--member-name":
+        opts.memberName = next();
+        break;
+      case "--accept":
+        opts.accept = next();
+        break;
       case undefined:
         break;
       default:
@@ -1606,9 +1839,12 @@ Other:
   org invite <slug> --to orgpk1:… [--agent]    # encrypt invite to friend pubkey (clear-channel OK)
   org invite <slug> --out invite.json          # secret file fallback (raw e2e; transfer OOB)
   org invite <slug> --agent [--out path]       # pasteable agent instructions + secret file
-  org join --sealed orgseal1:…                 # join from pubkey-sealed package
+  org invite <slug> … --expires-in 72h         # invite lifetime (default 72h; one-time claim)
+  org join --sealed orgseal1:… [--member-name N]  # join; prints acceptance=orgaccept1:… to send back
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
+  org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints membership epoch N+1
+  org kick <slug> <member_id>                  # registry kick: mint revocation epoch (non-retroactive)
   org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
   org member list <slug> [--json]              # registry from the canonical signed epoch chain
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]

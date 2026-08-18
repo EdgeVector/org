@@ -17,6 +17,7 @@ import {
   orgEpochIndexSchema,
   orgEpochSchema,
   orgIndexSchema,
+  orgInviteClaimSchema,
   pathBindingIndexSchema,
   pathBindingSchema,
   type SchemaKind,
@@ -115,6 +116,7 @@ const ORG_DB_INDEX_FIELDS = orgDbIndexSchema.schema.fields.slice();
 const PATH_BINDING_INDEX_FIELDS = pathBindingIndexSchema.schema.fields.slice();
 const EPOCH_FIELDS = orgEpochSchema.schema.fields.slice();
 const EPOCH_INDEX_FIELDS = orgEpochIndexSchema.schema.fields.slice();
+const INVITE_CLAIM_FIELDS = orgInviteClaimSchema.schema.fields.slice();
 
 function arrayStringField(fields: Record<string, unknown>, key: string): string[] {
   const value = fields[key];
@@ -661,6 +663,88 @@ export async function listOrgEpochs(
     }
   }
   return { epochs, malformed };
+}
+
+export type ConsumedInviteClaim = {
+  claimNonce: string;
+  orgHash: string;
+  memberId: string;
+  epochHash: string;
+  consumedAt: string;
+};
+
+export function requireInviteClaimBinding(config: Config): void {
+  if (!hasSchemaBinding(config, "OrgInviteClaim")) {
+    throw new Error(
+      "OrgInviteClaim schema not initialized (invite replay protection). Re-run `org init`.",
+    );
+  }
+}
+
+/** Point-get replay check: a nonce with a row is spent. */
+export async function getConsumedInviteClaim(
+  client: LastDbClient,
+  config: Config,
+  claimNonce: string,
+): Promise<ConsumedInviteClaim | null> {
+  requireInviteClaimBinding(config);
+  const sid = schemaId(config, "OrgInviteClaim");
+  const row = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: claimNonce,
+    fields: INVITE_CLAIM_FIELDS,
+  });
+  if (!row) return null;
+  return {
+    claimNonce: str(row.fields.claim_nonce),
+    orgHash: str(row.fields.org_hash),
+    memberId: str(row.fields.member_id),
+    epochHash: str(row.fields.epoch_hash),
+    consumedAt: str(row.fields.consumed_at),
+  };
+}
+
+/** Burn a claim nonce. Written BEFORE the epoch mint so a crash can never
+ * leave a replayable claim; a burned-but-unminted claim fails loudly instead. */
+export async function putConsumedInviteClaim(
+  client: LastDbClient,
+  config: Config,
+  claim: ConsumedInviteClaim,
+): Promise<void> {
+  requireInviteClaimBinding(config);
+  const sid = schemaId(config, "OrgInviteClaim");
+  await client.createRecord({
+    schemaHash: sid,
+    keyHash: claim.claimNonce,
+    fields: {
+      claim_nonce: claim.claimNonce,
+      org_hash: claim.orgHash,
+      member_id: claim.memberId,
+      epoch_hash: claim.epochHash,
+      consumed_at: claim.consumedAt,
+    },
+  });
+}
+
+/** Stamp the minted epoch onto an already-burned claim row. */
+export async function updateConsumedInviteClaim(
+  client: LastDbClient,
+  config: Config,
+  claim: ConsumedInviteClaim,
+): Promise<void> {
+  requireInviteClaimBinding(config);
+  const sid = schemaId(config, "OrgInviteClaim");
+  await client.updateRecord({
+    schemaHash: sid,
+    keyHash: claim.claimNonce,
+    fields: {
+      claim_nonce: claim.claimNonce,
+      org_hash: claim.orgHash,
+      member_id: claim.memberId,
+      epoch_hash: claim.epochHash,
+      consumed_at: claim.consumedAt,
+    },
+  });
 }
 
 export function buildAdminOrgSlice(
