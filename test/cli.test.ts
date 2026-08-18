@@ -1,13 +1,17 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { run, type CliDeps } from "../src/cli.ts";
+import { readConfig } from "../src/config.ts";
+import { buildEpochPayload, signEpochPayload } from "../src/epoch.ts";
 import type { InviteTransport } from "../src/invite-transport.ts";
 import { buildInviteClaim, type InviteClaim, type OrgInvite } from "../src/invite.ts";
 import type { LastDbClient, QueryRow } from "../src/lastdb.ts";
 import type { LastSecretsCli } from "../src/lastsecrets.ts";
+import { generateMemberSealIdentity, memberPubkeyLine } from "../src/member-identity.ts";
+import { listOrgEpochs, putOrgEpoch } from "../src/storage.ts";
 
 function captureIo(stdin = "") {
   let stdout = "";
@@ -132,6 +136,21 @@ function memoryInviteTransport(): InviteTransport & {
 }
 
 describe("org CLI", () => {
+  // Hermetic member identity: `org create` mints the genesis epoch from the
+  // local member identity; never touch the real ~/.org/member-seal.json.
+  let identityDir = "";
+  let savedIdentityPath: string | undefined;
+  beforeAll(() => {
+    identityDir = mkdtempSync(join(tmpdir(), "org-cli-id-"));
+    savedIdentityPath = process.env.ORG_MEMBER_IDENTITY_PATH;
+    process.env.ORG_MEMBER_IDENTITY_PATH = join(identityDir, "member-seal.json");
+  });
+  afterAll(() => {
+    if (savedIdentityPath === undefined) delete process.env.ORG_MEMBER_IDENTITY_PATH;
+    else process.env.ORG_MEMBER_IDENTITY_PATH = savedIdentityPath;
+    rmSync(identityDir, { recursive: true, force: true });
+  });
+
   it("prints help", async () => {
     const io = captureIo();
     const code = await run(["help"], io);
@@ -163,6 +182,8 @@ describe("org CLI", () => {
         "OrgIndex",
         "OrgDbIndex",
         "PathBindingIndex",
+        "OrgEpoch",
+        "OrgEpochIndex",
       ]);
       expect(io.out()).toContain("initialized org config");
 
@@ -462,6 +483,255 @@ describe("org CLI", () => {
     } finally {
       if (prev === undefined) delete process.env.ORG_INVITE_TRANSPORT;
       else process.env.ORG_INVITE_TRANSPORT = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("org epoch CLI", () => {
+  let identityDir = "";
+  let savedIdentityPath: string | undefined;
+  beforeAll(() => {
+    identityDir = mkdtempSync(join(tmpdir(), "org-epoch-id-"));
+    savedIdentityPath = process.env.ORG_MEMBER_IDENTITY_PATH;
+    process.env.ORG_MEMBER_IDENTITY_PATH = join(identityDir, "member-seal.json");
+  });
+  afterAll(() => {
+    if (savedIdentityPath === undefined) delete process.env.ORG_MEMBER_IDENTITY_PATH;
+    else process.env.ORG_MEMBER_IDENTITY_PATH = savedIdentityPath;
+    rmSync(identityDir, { recursive: true, force: true });
+  });
+
+  async function setupOrg() {
+    const dir = mkdtempSync(join(tmpdir(), "org-epoch-cli-"));
+    const configPath = join(dir, "config.json");
+    const client = memoryClient("owner-1");
+    const secrets = memorySecrets();
+    const deps: CliDeps = { lastSecrets: secrets, newClient: () => client };
+    let io = captureIo();
+    expect(await run(["init", "--config", configPath], io, deps)).toBe(0);
+    io = captureIo();
+    expect(
+      await run(
+        [
+          "create",
+          "edgevector",
+          "--name",
+          "Edge Vector",
+          "--owner-name",
+          "Owner One",
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      ),
+    ).toBe(0);
+    expect(io.out()).toContain("signed genesis epoch=0");
+    return { dir, configPath, client, secrets, deps };
+  }
+
+  function friendSpec() {
+    const id = generateMemberSealIdentity();
+    return JSON.stringify({
+      member_id: "friend-1",
+      name: "Friend One",
+      sign_pk: id.signing_public_key,
+      seal_pk: memberPubkeyLine(id),
+      roles: ["member"],
+    });
+  }
+
+  it("genesis roundtrip: create writes a verifiable epoch 0 registry", async () => {
+    const { dir, configPath, deps } = await setupOrg();
+    try {
+      let io = captureIo();
+      expect(await run(["epoch", "verify", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      expect(io.out()).toContain("epoch chain ok: epochs=1");
+
+      io = captureIo();
+      expect(await run(["member", "list", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      expect(io.out()).toContain("registry org=edgevector epoch=0");
+      expect(io.out()).toContain('name="Owner One"');
+      expect(io.out()).toContain("roles=owner");
+      expect(io.out()).toContain("status=active");
+      expect(io.out()).toContain("sign_pk=");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("epoch sign adds a member; member list shows sign_pk, role, provenance; revoke renders", async () => {
+    const { dir, configPath, deps } = await setupOrg();
+    try {
+      const spec = friendSpec();
+      const parsedSpec = JSON.parse(spec) as { sign_pk: string };
+      let io = captureIo();
+      expect(
+        await run(
+          ["epoch", "sign", "edgevector", "--add-member", spec, "--config", configPath],
+          io,
+          deps,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=1");
+
+      io = captureIo();
+      expect(await run(["member", "list", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      expect(io.out()).toContain("registry org=edgevector epoch=1");
+      expect(io.out()).toContain("member_id=friend-1");
+      expect(io.out()).toContain(`sign_pk=${parsedSpec.sign_pk}`);
+      expect(io.out()).toContain("roles=member");
+      expect(io.out()).toContain("added_epoch=1");
+
+      // Duplicate add refuses.
+      io = captureIo();
+      expect(
+        await run(
+          ["epoch", "sign", "edgevector", "--add-member", spec, "--config", configPath],
+          io,
+          deps,
+        ),
+      ).toBe(1);
+      expect(io.err()).toContain("already present");
+
+      // Revoke; the registry renders the entry as revoked (non-retroactive).
+      io = captureIo();
+      expect(
+        await run(
+          ["epoch", "sign", "edgevector", "--revoke", "friend-1", "--config", configPath],
+          io,
+          deps,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=2");
+      expect(io.out()).toContain("(+1 revoked)");
+
+      io = captureIo();
+      expect(await run(["member", "list", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      expect(io.out()).toContain("registry org=edgevector epoch=2");
+      expect(io.out()).toMatch(/member_id=friend-1 .*status=revoked/);
+
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "list", "edgevector", "--json", "--config", configPath],
+          io,
+          deps,
+        ),
+      ).toBe(0);
+      const listed = JSON.parse(io.out()) as {
+        epoch_no: number;
+        members: { member_id: string; status: string; added_epoch: number }[];
+      };
+      expect(listed.epoch_no).toBe(2);
+      const friend = listed.members.find((m) => m.member_id === "friend-1");
+      expect(friend?.status).toBe("revoked");
+      expect(friend?.added_epoch).toBe(1);
+
+      // The sole active owner cannot be revoked.
+      const ownerId = listed.members.find((m) => m.member_id !== "friend-1")!.member_id;
+      io = captureIo();
+      expect(
+        await run(
+          ["epoch", "sign", "edgevector", "--revoke", ownerId, "--config", configPath],
+          io,
+          deps,
+        ),
+      ).toBe(1);
+      expect(io.err()).toContain("no active owner");
+
+      // epoch log walks genesis → tip.
+      io = captureIo();
+      expect(await run(["epoch", "log", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      const logLines = io.out().trim().split("\n");
+      expect(logLines.length).toBe(3);
+      expect(logLines[0]).toContain("epoch=0");
+      expect(logLines[2]).toContain("epoch=2");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fork tie-break is deterministic: competing epoch 1 resolves to the same winner on repeated runs", async () => {
+    const { dir, configPath, client, secrets, deps } = await setupOrg();
+    try {
+      let io = captureIo();
+      expect(
+        await run(["epoch", "show", "edgevector", "--json", "--config", configPath], io, deps),
+      ).toBe(0);
+      const genesis = JSON.parse(io.out()) as {
+        epoch_hash: string;
+        payload: { org_hash: string; members: unknown[] };
+      };
+
+      const orgPrivateKey = secrets.bag.get("org-edgevector-private")!;
+      const config = readConfig(configPath);
+      const mkFork = (nonce: string) =>
+        signEpochPayload(
+          buildEpochPayload({
+            orgHash: genesis.payload.org_hash,
+            epochNo: 1,
+            prevEpoch: genesis.epoch_hash,
+            members: genesis.payload.members as never,
+            nonce,
+          }),
+          orgPrivateKey,
+        );
+      const forkA = mkFork("a".repeat(32));
+      const forkB = mkFork("b".repeat(32));
+      expect(forkA.epoch_hash).not.toBe(forkB.epoch_hash);
+      const expected =
+        forkA.epoch_hash < forkB.epoch_hash ? forkA.epoch_hash : forkB.epoch_hash;
+      await putOrgEpoch(client, config, forkA);
+      await putOrgEpoch(client, config, forkB);
+
+      // Repeated runs pick the identical winner.
+      for (let round = 0; round < 2; round += 1) {
+        io = captureIo();
+        expect(
+          await run(["epoch", "show", "edgevector", "--json", "--config", configPath], io, deps),
+        ).toBe(0);
+        const tip = JSON.parse(io.out()) as { epoch_hash: string };
+        expect(tip.epoch_hash).toBe(expected);
+      }
+      io = captureIo();
+      expect(await run(["epoch", "verify", "edgevector", "--config", configPath], io, deps)).toBe(0);
+      expect(io.out()).toContain("epochs=2");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("verify fails loudly when a stored epoch's payload bytes are tampered", async () => {
+    const { dir, configPath, client, deps } = await setupOrg();
+    try {
+      const config = readConfig(configPath);
+      let orgHash = "";
+      for (const row of client.store.values()) {
+        if (typeof row.fields.org_hash === "string" && row.fields.org_hash.length > 0) {
+          orgHash = row.fields.org_hash;
+          break;
+        }
+      }
+      const listing = await listOrgEpochs(client, config, orgHash);
+      expect(listing.epochs.length).toBe(1);
+      const tipHash = listing.epochs[0]!.epoch_hash;
+      for (const [key, row] of client.store.entries()) {
+        if (row.fields.epoch_hash === tipHash && typeof row.fields.payload === "string") {
+          client.store.set(key, {
+            ...row,
+            fields: {
+              ...row.fields,
+              payload: row.fields.payload.replace('"owner"', '"Owner"'),
+            },
+          });
+        }
+      }
+      const io = captureIo();
+      expect(await run(["epoch", "verify", "edgevector", "--config", configPath], io, deps)).toBe(1);
+      expect(io.err()).toContain("epoch chain INVALID");
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

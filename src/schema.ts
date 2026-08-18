@@ -330,6 +330,103 @@ export const pathBindingIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Owner-signed, hash-chained membership epoch. The epoch chain IS the member
+ * registry (decision-2026-08-18-lastgit-collaborator-trust-epochs); there are
+ * no mutable member rows. Point-get by epoch_hash; per-org enumeration goes
+ * through OrgEpochIndex (no scans).
+ */
+export const orgEpochSchema: AddSchemaRequest = {
+  schema: {
+    name: "OrgEpoch",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Org Membership Epoch",
+    purpose_statement:
+      "Owner-signed hash-chained membership snapshot; the epoch chain is the org member registry",
+    schema_type: "Hash",
+    key: { hash_field: "epoch_hash" },
+    fields: [
+      "epoch_hash",
+      "org_hash",
+      "epoch_no",
+      "prev_epoch",
+      "payload",
+      "sig",
+      "created_at",
+    ],
+    field_types: {
+      epoch_hash: "String",
+      org_hash: "String",
+      epoch_no: "String",
+      prev_epoch: "String",
+      payload: "String",
+      sig: "String",
+      created_at: "String",
+    },
+    field_descriptions: {
+      epoch_hash: "sha256 hex of the JCS canonical payload (primary key)",
+      org_hash: "org identity hash this epoch belongs to",
+      epoch_no: "epoch sequence number as decimal string (genesis 0)",
+      prev_epoch: 'sha256 hex of the predecessor payload ("" at genesis)',
+      payload: "exact JCS canonical payload bytes (the signed content)",
+      sig: "base64url Ed25519 signature by the org root key over payload",
+      created_at: "RFC 3339 timestamp of the local write (informational)",
+    },
+    field_classifications: {
+      org_hash: ["word"],
+      epoch_no: ["word"],
+      prev_epoch: ["word"],
+      payload: ["no_index"],
+      sig: ["no_index"],
+    },
+    field_data_classifications: {
+      epoch_hash: PUBLIC,
+      org_hash: PUBLIC,
+      epoch_no: PUBLIC,
+      prev_epoch: PUBLIC,
+      payload: PUBLIC,
+      sig: PUBLIC,
+      created_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Thin list-view index over OrgEpoch records, partitioned by org_hash.
+ * Point-reading this replaces any scan when enumerating an org's epochs
+ * (canonical-chain selection loads the listed hashes individually).
+ */
+export const orgEpochIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "OrgEpochIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Org Epoch Index",
+    purpose_statement:
+      "Point-read list view of OrgEpoch hashes per organization, maintained on write",
+    schema_type: "Hash",
+    key: { hash_field: "org_hash" },
+    fields: ["org_hash", "epoch_hashes", "updated_at"],
+    field_types: {
+      org_hash: "String",
+      epoch_hashes: { Array: "String" },
+      updated_at: "String",
+    },
+    field_descriptions: {
+      org_hash: "organization identity hash (partition key)",
+      epoch_hashes: "every OrgEpoch hash known to this node for the org",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {},
+    field_data_classifications: {
+      org_hash: PUBLIC,
+      epoch_hashes: PUBLIC,
+      updated_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export const ALL_SCHEMAS: AddSchemaRequest[] = [
   organizationSchema,
   orgDatabaseSchema,
@@ -337,6 +434,8 @@ export const ALL_SCHEMAS: AddSchemaRequest[] = [
   orgIndexSchema,
   orgDbIndexSchema,
   pathBindingIndexSchema,
+  orgEpochSchema,
+  orgEpochIndexSchema,
 ];
 
 export type SchemaKind =
@@ -345,7 +444,9 @@ export type SchemaKind =
   | "PathBinding"
   | "OrgIndex"
   | "OrgDbIndex"
-  | "PathBindingIndex";
+  | "PathBindingIndex"
+  | "OrgEpoch"
+  | "OrgEpochIndex";
 
 /** Constant hash key for the single-row per-node indexes (OrgIndex, PathBindingIndex). */
 export const INDEX_SCOPE = "local";
