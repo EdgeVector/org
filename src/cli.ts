@@ -6,6 +6,17 @@ import { dirname, resolve as pathResolve } from "node:path";
 import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
 import { generateOrgKeys } from "./crypto.ts";
 import {
+  buildEpochPayload,
+  formatEpochSummary,
+  memberAddedEpoch,
+  resolveCanonicalChain,
+  signEpochPayload,
+  signPkFingerprint,
+  type EpochMember,
+  type OrgEpoch,
+  type ResolvedChain,
+} from "./epoch.ts";
+import {
   formatDbLocator,
   LASTDB_DB_ENV,
   parseDbLocator,
@@ -59,15 +70,20 @@ import {
   formatDb,
   formatOrg,
   getOrgDatabase,
+  getOrgEpoch,
   getOrganization,
   listOrgDatabases,
+  listOrgEpochs,
   listOrganizations,
   listPathBindings,
+  putOrgEpoch,
   putOrganization,
   putOrgDatabase,
   putPathBinding,
   removePathBinding,
+  requireEpochBindings,
   toResolveBindings,
+  type Organization,
 } from "./storage.ts";
 import {
   grantOrgCloudMember,
@@ -165,6 +181,10 @@ export async function run(
 
     if (command === "member") {
       return await cmdMember(arg, tail, io, deps);
+    }
+
+    if (command === "epoch") {
+      return await cmdEpoch(arg, tail, io, deps);
     }
 
     if (command === "db") {
@@ -274,6 +294,9 @@ async function cmdCreate(
   assertSlug(slug, "org slug");
   const name = opts.name ?? slug;
   const { client, config } = await loadSession(opts, deps);
+  // Fail closed before any key material is minted: the epoch chain IS the
+  // member registry, so an org without a signed genesis is not an org.
+  requireEpochBindings(config);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
 
   // Prefer catalog identity hash — same rule as storage.schemaId (app names
@@ -324,6 +347,32 @@ async function cmdCreate(
 
   io.stdout.write(`created organization ${formatOrg(org)}\n`);
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
+
+  // Genesis epoch 0: the owner entry with its v2 signing identity, signed by
+  // the org root key. The chain starts here; `org member list` reads it.
+  const identity = loadOrCreateMemberIdentity(
+    opts.identityPath ?? defaultMemberIdentityPath(),
+  );
+  const owner: EpochMember = {
+    member_id: memberFingerprint(identity),
+    name: opts.ownerName ?? "owner",
+    sign_pk: identity.signing_public_key,
+    seal_pk: memberPubkeyLine(identity),
+    roles: ["owner"],
+    status: "active",
+  };
+  const genesis = signEpochPayload(
+    buildEpochPayload({
+      orgHash: keys.orgHash,
+      epochNo: 0,
+      prevEpoch: "",
+      members: [owner],
+    }),
+    keys.orgPrivateKey,
+  );
+  await putOrgEpoch(client, config, genesis);
+  io.stdout.write(`signed genesis ${formatEpochSummary(genesis)}\n`);
+
   await armOrgCloudSync({
     orgHash: keys.orgHash,
     e2eKeyB64: keys.e2eKey,
@@ -631,10 +680,48 @@ async function cmdMember(
 ): Promise<number> {
   if (!sub || sub === "help" || sub === "--help") {
     io.stdout.write(
-      "org member grant <slug> <user_hash> [--role writer|reader]\n" +
+      "org member list <slug> [--json]        # registry from the canonical signed epoch\n" +
+        "org member grant <slug> <user_hash> [--role writer|reader]\n" +
         "org member revoke <slug> <user_hash>\n" +
         "org member leave <slug>\n",
     );
+    return 0;
+  }
+  if (sub === "list") {
+    const slug = rest[0];
+    if (!slug) throw new Error("usage: org member list <slug> [--json]");
+    const listOpts = parseOptions(rest.slice(1));
+    const { client, config } = await loadSession(listOpts, deps);
+    const org = await getOrganization(client, config, slug);
+    const resolved = await loadEpochChain(client, config, org, io);
+    if (!resolved.ok || !resolved.tip) {
+      throw new Error(`member registry unavailable: ${resolved.error ?? "no canonical epoch"}`);
+    }
+    const tip = resolved.tip;
+    if (listOpts.json) {
+      io.stdout.write(
+        `${JSON.stringify(
+          {
+            org: org.slug,
+            epoch_no: tip.payload.epoch_no,
+            epoch_hash: tip.epoch_hash,
+            members: tip.payload.members.map((m) => ({
+              ...m,
+              added_epoch: memberAddedEpoch(resolved.chain, m.member_id),
+            })),
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      return 0;
+    }
+    io.stdout.write(
+      `registry org=${org.slug} epoch=${tip.payload.epoch_no} epoch_hash=${tip.epoch_hash}\n`,
+    );
+    for (const member of tip.payload.members) {
+      io.stdout.write(`${formatEpochMember(member, resolved.chain)}\n`);
+    }
     return 0;
   }
   const opts = parseOptions(rest);
@@ -693,6 +780,301 @@ async function cmdMember(
     return 0;
   }
   throw new Error(`unknown member subcommand: ${sub}`);
+}
+
+/**
+ * Membership epoch chain (the registry itself).
+ *
+ *   org epoch sign <slug> [--add-member SPEC] [--revoke MEMBER_ID] [--repo-admins JSON]
+ *   org epoch show <slug> [EPOCH_HASH] [--json]
+ *   org epoch verify <slug> [--json]
+ *   org epoch log <slug>
+ */
+async function cmdEpoch(
+  sub: string | undefined,
+  rest: string[],
+  io: Io,
+  deps: CliDeps,
+): Promise<number> {
+  if (!sub || sub === "help" || sub === "--help") {
+    io.stdout.write(epochUsage());
+    return 0;
+  }
+  const slug = rest[0];
+  if (!slug) throw new Error(`usage: org epoch ${sub} <slug> …\n${epochUsage()}`);
+  const opts = parseOptions(rest.slice(1));
+  const { client, config } = await loadSession(opts, deps);
+  const org = await getOrganization(client, config, slug);
+
+  if (sub === "sign") {
+    const secrets = deps.lastSecrets ?? newLastSecretsCli();
+    const orgPrivateKey = secrets.get(`org-${slug}-private`);
+    const resolved = await loadEpochChain(client, config, org, io);
+    if (!resolved.ok || !resolved.tip) {
+      throw new Error(
+        `refusing to sign atop an unverifiable chain: ${resolved.error ?? "no canonical epoch"}`,
+      );
+    }
+    const tip = resolved.tip;
+    const members: EpochMember[] = tip.payload.members.map((m) => ({
+      ...m,
+      roles: m.roles.slice(),
+    }));
+
+    let changed = false;
+    if (opts.addMember) {
+      const added = parseMemberSpec(opts.addMember);
+      const clash = members.find((m) => m.member_id === added.member_id);
+      if (clash) {
+        throw new Error(
+          `member_id already present in the registry: ${added.member_id} (status=${clash.status})`,
+        );
+      }
+      members.push(added);
+      changed = true;
+    }
+    if (opts.revoke) {
+      const target = members.find((m) => m.member_id === opts.revoke);
+      if (!target) throw new Error(`member not found in registry: ${opts.revoke}`);
+      if (target.status === "revoked") {
+        throw new Error(`member already revoked: ${opts.revoke}`);
+      }
+      target.status = "revoked";
+      changed = true;
+    }
+    let repoAdmins = tip.payload.repo_admins;
+    if (opts.repoAdmins) {
+      repoAdmins = parseRepoAdmins(opts.repoAdmins);
+      changed = true;
+    }
+    if (!changed && !opts.force) {
+      throw new Error(
+        "no membership changes requested (use --add-member/--revoke/--repo-admins, or --force to re-sign as-is)",
+      );
+    }
+    if (!members.some((m) => m.status === "active" && m.roles.includes("owner"))) {
+      throw new Error("refusing to sign an epoch with no active owner");
+    }
+
+    const epoch = signEpochPayload(
+      buildEpochPayload({
+        orgHash: org.orgHash,
+        epochNo: tip.payload.epoch_no + 1,
+        prevEpoch: tip.epoch_hash,
+        members,
+        ...(repoAdmins !== undefined ? { repoAdmins } : {}),
+      }),
+      orgPrivateKey,
+    );
+    await putOrgEpoch(client, config, epoch);
+    io.stdout.write(`signed ${formatEpochSummary(epoch)}\n`);
+    return 0;
+  }
+
+  if (sub === "show") {
+    const explicitHash = rest[1] && !rest[1].startsWith("-") ? rest[1] : undefined;
+    let epoch: OrgEpoch | null;
+    let chain: OrgEpoch[] = [];
+    if (explicitHash) {
+      epoch = await getOrgEpoch(client, config, explicitHash);
+      if (!epoch) throw new Error(`epoch not found: ${explicitHash}`);
+    } else {
+      const resolved = await loadEpochChain(client, config, org, io);
+      if (!resolved.ok || !resolved.tip) {
+        throw new Error(`no canonical epoch: ${resolved.error ?? "chain unresolved"}`);
+      }
+      epoch = resolved.tip;
+      chain = resolved.chain;
+    }
+    if (opts.json) {
+      io.stdout.write(
+        `${JSON.stringify(
+          { epoch_hash: epoch.epoch_hash, sig: epoch.sig, payload: epoch.payload },
+          null,
+          2,
+        )}\n`,
+      );
+      return 0;
+    }
+    io.stdout.write(`${formatEpochSummary(epoch)}\n`);
+    io.stdout.write(`prev_epoch=${epoch.payload.prev_epoch || "(genesis)"}\n`);
+    io.stdout.write(`sig=${epoch.sig}\n`);
+    for (const member of epoch.payload.members) {
+      io.stdout.write(`${formatEpochMember(member, chain)}\n`);
+    }
+    if (epoch.payload.repo_admins) {
+      for (const [repo, admins] of Object.entries(epoch.payload.repo_admins)) {
+        io.stdout.write(`repo_admins ${repo}=${admins.join(",")}\n`);
+      }
+    }
+    return 0;
+  }
+
+  if (sub === "verify") {
+    const listing = await listOrgEpochs(client, config, org.orgHash);
+    const resolved = resolveCanonicalChain(listing.epochs, {
+      orgHash: org.orgHash,
+      orgPublicKeyB64: org.orgPublicKey,
+    });
+    const problems = [
+      ...listing.malformed.map((m) => `malformed ${m.epoch_hash}: ${m.error}`),
+      ...resolved.invalid.map((m) => `invalid ${m.epoch_hash}: ${m.error}`),
+    ];
+    const ok = resolved.ok && problems.length === 0;
+    if (opts.json) {
+      io.stdout.write(
+        `${JSON.stringify(
+          {
+            ok,
+            error: resolved.error ?? null,
+            problems,
+            epochs: resolved.chain.length,
+            tip: resolved.tip
+              ? { epoch_no: resolved.tip.payload.epoch_no, epoch_hash: resolved.tip.epoch_hash }
+              : null,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      return ok ? 0 : 1;
+    }
+    for (const problem of problems) io.stderr.write(`${problem}\n`);
+    if (!ok) {
+      io.stderr.write(`epoch chain INVALID: ${resolved.error ?? "records failed verification"}\n`);
+      return 1;
+    }
+    io.stdout.write(
+      `epoch chain ok: epochs=${resolved.chain.length} tip=${formatEpochSummary(resolved.tip!)}\n`,
+    );
+    return 0;
+  }
+
+  if (sub === "log") {
+    const resolved = await loadEpochChain(client, config, org, io);
+    if (!resolved.ok) {
+      throw new Error(`cannot log epoch chain: ${resolved.error ?? "chain unresolved"}`);
+    }
+    for (const epoch of resolved.chain) {
+      io.stdout.write(`${formatEpochSummary(epoch)}\n`);
+    }
+    return 0;
+  }
+
+  throw new Error(`unknown epoch subcommand: ${sub}\n${epochUsage()}`);
+}
+
+/** Load, filter, and verify the canonical chain; warn (stderr) on bad records. */
+async function loadEpochChain(
+  client: ReturnType<typeof newLastDbClient>,
+  config: Config,
+  org: Organization,
+  io: Io,
+): Promise<ResolvedChain> {
+  const listing = await listOrgEpochs(client, config, org.orgHash);
+  for (const bad of listing.malformed) {
+    io.stderr.write(`warning: ignoring malformed epoch ${bad.epoch_hash}: ${bad.error}\n`);
+  }
+  const resolved = resolveCanonicalChain(listing.epochs, {
+    orgHash: org.orgHash,
+    orgPublicKeyB64: org.orgPublicKey,
+  });
+  for (const bad of resolved.invalid) {
+    io.stderr.write(`warning: ignoring invalid epoch ${bad.epoch_hash}: ${bad.error}\n`);
+  }
+  return resolved;
+}
+
+function formatEpochMember(member: EpochMember, chain: OrgEpoch[]): string {
+  const added = memberAddedEpoch(chain, member.member_id);
+  return [
+    `member_id=${member.member_id}`,
+    `name=${JSON.stringify(member.name)}`,
+    `roles=${member.roles.join(",")}`,
+    `status=${member.status}`,
+    added !== null ? `added_epoch=${added}` : "",
+    `sign_pk_fp=${signPkFingerprint(member.sign_pk)}`,
+    `sign_pk=${member.sign_pk}`,
+    `seal_pk=${member.seal_pk}`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Member spec for `epoch sign --add-member`: inline JSON or @file.json. */
+function parseMemberSpec(spec: string): EpochMember {
+  const text = spec.startsWith("@") ? readFileSync(spec.slice(1), "utf8") : spec;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      `--add-member must be JSON or @file.json ({name, sign_pk, seal_pk, [member_id], [roles]}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("--add-member JSON must be an object");
+  }
+  const r = raw as Record<string, unknown>;
+  const name = typeof r.name === "string" ? r.name : "";
+  const signPk = typeof r.sign_pk === "string" ? r.sign_pk : "";
+  const sealPk = typeof r.seal_pk === "string" ? r.seal_pk : "";
+  if (!name || !signPk || !sealPk) {
+    throw new Error("--add-member requires name, sign_pk (base64 Ed25519 SPKI), seal_pk (orgpk1:…)");
+  }
+  const sealParsed = parseMemberPubkey(sealPk);
+  const memberId =
+    typeof r.member_id === "string" && r.member_id.length > 0
+      ? r.member_id
+      : sealParsed.fingerprint;
+  const roles = Array.isArray(r.roles)
+    ? r.roles.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : ["member"];
+  if (roles.length === 0) roles.push("member");
+  return {
+    member_id: memberId,
+    name,
+    sign_pk: signPk,
+    seal_pk: sealParsed.encoded,
+    roles,
+    status: "active",
+  };
+}
+
+function parseRepoAdmins(spec: string): Record<string, string[]> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(spec);
+  } catch (err) {
+    throw new Error(
+      `--repo-admins must be JSON ({"repo": ["member_id", …]}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("--repo-admins JSON must be an object map");
+  }
+  const out: Record<string, string[]> = {};
+  for (const [repo, ids] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(ids) || ids.some((x) => typeof x !== "string" || x.length === 0)) {
+      throw new Error(`--repo-admins ${repo} must map to an array of member_ids`);
+    }
+    out[repo] = ids as string[];
+  }
+  return out;
+}
+
+function epochUsage(): string {
+  return `org epoch subcommands (owner-signed membership chain — the registry):
+  org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
+                        [--repo-admins JSON] [--force]
+  org epoch show <slug> [EPOCH_HASH] [--json]
+  org epoch verify <slug> [--json]
+  org epoch log <slug>
+`;
 }
 
 async function cmdSync(
@@ -1038,6 +1420,16 @@ type Options = {
   json?: boolean;
   /** Registry role for `org member grant` (`writer` | `reader`). */
   role?: string;
+  /** Owner display name for the genesis epoch member entry. */
+  ownerName?: string;
+  /** Member spec (JSON or @file) for `epoch sign --add-member`. */
+  addMember?: string;
+  /** member_id to revoke for `epoch sign --revoke`. */
+  revoke?: string;
+  /** repo_admins override map (JSON) for `epoch sign --repo-admins`. */
+  repoAdmins?: string;
+  /** Allow `epoch sign` with no membership changes (re-sign as-is). */
+  force?: boolean;
 };
 
 type ResolveFlags = {
@@ -1155,6 +1547,21 @@ function parseOptions(args: string[]): Options {
       case "--role":
         opts.role = next();
         break;
+      case "--owner-name":
+        opts.ownerName = next();
+        break;
+      case "--add-member":
+        opts.addMember = next();
+        break;
+      case "--revoke":
+        opts.revoke = next();
+        break;
+      case "--repo-admins":
+        opts.repoAdmins = next();
+        break;
+      case "--force":
+        opts.force = true;
+        break;
       case undefined:
         break;
       default:
@@ -1203,6 +1610,9 @@ Other:
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
+  org member list <slug> [--json]              # registry from the canonical signed epoch chain
+  org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
+  org epoch show|verify|log <slug>             # owner-signed membership epochs (see org epoch help)
   org member grant <slug> <user_hash> [--role writer|reader]
   org member revoke <slug> <user_hash>         # kick: stop their live cloud sync (no E2E rotate)
   org member leave <slug>                      # self-revoke cloud membership

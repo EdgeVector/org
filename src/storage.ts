@@ -5,6 +5,7 @@ import { schemaBinding } from "./config.ts";
 import type { LastDbClient, QueryRow } from "./lastdb.ts";
 import type { PathBinding } from "./resolve.ts";
 import { normalizePath } from "./resolve.ts";
+import { parseEpoch, type OrgEpoch } from "./epoch.ts";
 import {
   assertSlug,
   dbId,
@@ -13,6 +14,8 @@ import {
   organizationSchema,
   orgDatabaseSchema,
   orgDbIndexSchema,
+  orgEpochIndexSchema,
+  orgEpochSchema,
   orgIndexSchema,
   pathBindingIndexSchema,
   pathBindingSchema,
@@ -110,6 +113,8 @@ const BIND_FIELDS = pathBindingSchema.schema.fields.slice();
 const ORG_INDEX_FIELDS = orgIndexSchema.schema.fields.slice();
 const ORG_DB_INDEX_FIELDS = orgDbIndexSchema.schema.fields.slice();
 const PATH_BINDING_INDEX_FIELDS = pathBindingIndexSchema.schema.fields.slice();
+const EPOCH_FIELDS = orgEpochSchema.schema.fields.slice();
+const EPOCH_INDEX_FIELDS = orgEpochIndexSchema.schema.fields.slice();
 
 function arrayStringField(fields: Record<string, unknown>, key: string): string[] {
   const value = fields[key];
@@ -518,6 +523,144 @@ export function toResolveBindings(stored: StoredPathBinding[]): PathBinding[] {
       dbSlug: b.dbSlug,
       orgHash: b.orgHash || undefined,
     }));
+}
+
+export function requireEpochBindings(config: Config): void {
+  if (!hasSchemaBinding(config, "OrgEpoch") || !hasSchemaBinding(config, "OrgEpochIndex")) {
+    throw new Error(
+      "OrgEpoch schemas not initialized (membership epoch chain). Re-run `org init`.",
+    );
+  }
+}
+
+/** Read-modify-write append into the per-org OrgEpochIndex partition. */
+async function addToOrgEpochIndex(
+  client: LastDbClient,
+  config: Config,
+  orgHash: string,
+  epochHash: string,
+): Promise<void> {
+  const sid = schemaId(config, "OrgEpochIndex");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: orgHash,
+    fields: EPOCH_INDEX_FIELDS,
+  });
+  const hashes = existing ? arrayStringField(existing.fields, "epoch_hashes") : [];
+  if (hashes.includes(epochHash)) return;
+  hashes.push(epochHash);
+  const fields = {
+    org_hash: orgHash,
+    epoch_hashes: hashes,
+    updated_at: new Date().toISOString(),
+  };
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: orgHash, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: orgHash, fields });
+  }
+}
+
+/** Persist a signed epoch (point record by epoch_hash + per-org index entry). */
+export async function putOrgEpoch(
+  client: LastDbClient,
+  config: Config,
+  epoch: OrgEpoch,
+): Promise<void> {
+  requireEpochBindings(config);
+  const sid = schemaId(config, "OrgEpoch");
+  const existing = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: epoch.epoch_hash,
+    fields: EPOCH_FIELDS,
+  });
+  const fields = {
+    epoch_hash: epoch.epoch_hash,
+    org_hash: epoch.payload.org_hash,
+    epoch_no: String(epoch.payload.epoch_no),
+    prev_epoch: epoch.payload.prev_epoch,
+    payload: epoch.payload_jcs,
+    sig: epoch.sig,
+    created_at: new Date().toISOString(),
+  };
+  // Epochs are content-addressed and immutable; a re-put of the same hash is
+  // an idempotent overwrite with identical payload bytes.
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: epoch.epoch_hash, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: epoch.epoch_hash, fields });
+  }
+  await addToOrgEpochIndex(client, config, epoch.payload.org_hash, epoch.epoch_hash);
+}
+
+export async function getOrgEpoch(
+  client: LastDbClient,
+  config: Config,
+  epochHash: string,
+): Promise<OrgEpoch | null> {
+  requireEpochBindings(config);
+  const sid = schemaId(config, "OrgEpoch");
+  const row = await client.queryByKey({
+    schemaHash: sid,
+    keyHash: epochHash,
+    fields: EPOCH_FIELDS,
+  });
+  if (!row) return null;
+  return parseEpoch(str(row.fields.payload), str(row.fields.sig));
+}
+
+export type OrgEpochListing = {
+  epochs: OrgEpoch[];
+  /** Records that exist but no longer parse as canonical epochs (tampering/corruption). */
+  malformed: { epoch_hash: string; error: string }[];
+};
+
+/** Enumerate an org's epochs via the index — point reads only, no scans. */
+export async function listOrgEpochs(
+  client: LastDbClient,
+  config: Config,
+  orgHash: string,
+): Promise<OrgEpochListing> {
+  requireEpochBindings(config);
+  const indexSid = schemaId(config, "OrgEpochIndex");
+  const indexRow = await client.queryByKey({
+    schemaHash: indexSid,
+    keyHash: orgHash,
+    fields: EPOCH_INDEX_FIELDS,
+  });
+  const hashes = indexRow ? arrayStringField(indexRow.fields, "epoch_hashes") : [];
+  const sid = schemaId(config, "OrgEpoch");
+  const rows = await Promise.all(
+    hashes.map(async (hash) => ({
+      hash,
+      row: await client.queryByKey({ schemaHash: sid, keyHash: hash, fields: EPOCH_FIELDS }),
+    })),
+  );
+  const epochs: OrgEpoch[] = [];
+  const malformed: OrgEpochListing["malformed"] = [];
+  for (const { hash, row } of rows) {
+    if (!row) {
+      malformed.push({ epoch_hash: hash, error: "indexed epoch record missing" });
+      continue;
+    }
+    try {
+      const epoch = parseEpoch(str(row.fields.payload), str(row.fields.sig));
+      if (epoch.epoch_hash !== hash) {
+        malformed.push({
+          epoch_hash: hash,
+          error: `payload bytes hash to ${epoch.epoch_hash}, not the record key`,
+        });
+        continue;
+      }
+      epochs.push(epoch);
+    } catch (err) {
+      malformed.push({
+        epoch_hash: hash,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { epochs, malformed };
 }
 
 export function buildAdminOrgSlice(

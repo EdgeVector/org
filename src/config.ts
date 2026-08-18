@@ -102,6 +102,8 @@ function assertConfigShape(path: string, raw: unknown): Config {
     "OrgIndex",
     "OrgDbIndex",
     "PathBindingIndex",
+    "OrgEpoch",
+    "OrgEpochIndex",
   ];
   for (const kind of [
     "Organization",
@@ -110,6 +112,8 @@ function assertConfigShape(path: string, raw: unknown): Config {
     "OrgIndex",
     "OrgDbIndex",
     "PathBindingIndex",
+    "OrgEpoch",
+    "OrgEpochIndex",
   ] as const) {
     const entry = schemasRaw[kind];
     if (OPTIONAL_KINDS.includes(kind) && (entry === undefined || entry === null)) {
