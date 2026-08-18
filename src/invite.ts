@@ -1,14 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { assertSlug } from "./schema.ts";
 import { orgHashFromPublicKey } from "./crypto.ts";
 
 export const INVITE_VERSION = 1 as const;
 
+/** Default invite lifetime when `--expires-in` is not given. */
+export const DEFAULT_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
+
 /**
  * One-time join bundle. Contains the raw e2e_key so a peer can join without
  * sharing LastSecrets. After join, the key is stored via lastsecrets put and
  * only lastsecrets:// refs remain in org records.
+ *
+ * `expires_at` + `claim_nonce` power the epoch-chain accept flow: the joiner
+ * echoes them in its sealed acceptance, and the owner enforces expiry and
+ * one-time-claim before minting the membership epoch. Both are optional on
+ * the wire so invites from older CLIs still parse (they join locally but
+ * cannot mint an epoch).
  */
 export type OrgInvite = {
   version: typeof INVITE_VERSION;
@@ -20,7 +29,15 @@ export type OrgInvite = {
   e2e_key: string;
   created_by: string;
   issued_at: string;
+  /** RFC 3339 expiry; join and accept both reject after this instant. */
+  expires_at?: string;
+  /** One-time claim nonce (hex); consumed by the owner at accept. */
+  claim_nonce?: string;
 };
+
+export function newInviteClaimNonce(): string {
+  return randomBytes(16).toString("hex");
+}
 
 export function buildInvite(input: {
   slug: string;
@@ -29,10 +46,18 @@ export function buildInvite(input: {
   orgPublicKey: string;
   e2eKey: string;
   createdBy: string;
+  /** Milliseconds until expiry; defaults to DEFAULT_INVITE_TTL_MS. */
+  ttlMs?: number;
+  now?: Date;
 }): OrgInvite {
   assertSlug(input.slug, "org slug");
   if (!input.e2eKey || input.e2eKey.length < 16) {
     throw new Error("invite e2e_key is missing or too short");
+  }
+  const now = input.now ?? new Date();
+  const ttlMs = input.ttlMs ?? DEFAULT_INVITE_TTL_MS;
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new Error("invite ttl must be a positive duration");
   }
   return {
     version: INVITE_VERSION,
@@ -42,8 +67,18 @@ export function buildInvite(input: {
     org_public_key: input.orgPublicKey,
     e2e_key: input.e2eKey,
     created_by: input.createdBy,
-    issued_at: new Date().toISOString(),
+    issued_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + ttlMs).toISOString(),
+    claim_nonce: newInviteClaimNonce(),
   };
+}
+
+/** True when the invite carries an expiry that has passed. */
+export function inviteExpired(invite: OrgInvite, now = new Date()): boolean {
+  if (!invite.expires_at) return false;
+  const expires = Date.parse(invite.expires_at);
+  if (Number.isNaN(expires)) return true; // unparseable expiry fails closed
+  return now.getTime() > expires;
 }
 
 export function parseInvite(raw: unknown): OrgInvite {
@@ -74,7 +109,12 @@ export function parseInvite(raw: unknown): OrgInvite {
       `invite org_hash does not match org_public_key (got ${r.org_hash}, expected ${expectedHash})`,
     );
   }
-  return {
+  for (const key of ["expires_at", "claim_nonce"] as const) {
+    if (r[key] !== undefined && typeof r[key] !== "string") {
+      throw new Error(`invite ${key} must be a string when present`);
+    }
+  }
+  const invite: OrgInvite = {
     version: INVITE_VERSION,
     slug,
     name: r.name as string,
@@ -84,6 +124,13 @@ export function parseInvite(raw: unknown): OrgInvite {
     created_by: r.created_by as string,
     issued_at: r.issued_at as string,
   };
+  if (typeof r.expires_at === "string" && r.expires_at.length > 0) {
+    invite.expires_at = r.expires_at;
+  }
+  if (typeof r.claim_nonce === "string" && r.claim_nonce.length > 0) {
+    invite.claim_nonce = r.claim_nonce;
+  }
+  return invite;
 }
 
 export function serializeInvite(invite: OrgInvite): string {
@@ -360,9 +407,17 @@ org list
 org show ${slug}
 \`\`\`
 
+## 4) Send the acceptance back
+
+\`org join\` prints a line starting with \`acceptance=orgaccept1:…\`. Send that
+full token back to the org admin over any channel (it contains no secrets).
+The admin runs \`org member add ${slug} --accept '<token>'\` to add you to the
+signed member registry. You are not in the registry until they do.
+
 ## Done when
 
 - \`org show ${slug}\` succeeds
+- The \`acceptance=orgaccept1:…\` line was sent back to the admin
 - You never printed raw invite JSON or ran \`lastsecrets get\` on org keys
 `;
 }

@@ -10,7 +10,16 @@ import type { InviteTransport } from "../src/invite-transport.ts";
 import { buildInviteClaim, type InviteClaim, type OrgInvite } from "../src/invite.ts";
 import type { LastDbClient, QueryRow } from "../src/lastdb.ts";
 import type { LastSecretsCli } from "../src/lastsecrets.ts";
-import { generateMemberSealIdentity, memberPubkeyLine } from "../src/member-identity.ts";
+import { buildJoinAccept, sealJoinAccept } from "../src/join-accept.ts";
+import { unsealAnyInvite } from "../src/invite-seal.ts";
+import {
+  generateMemberSealIdentity,
+  loadMemberIdentity,
+  memberPrivateKeyObject,
+  memberPubkeyLine,
+  signMemberPayload,
+  verifyMemberPayload,
+} from "../src/member-identity.ts";
 import { listOrgEpochs, putOrgEpoch } from "../src/storage.ts";
 
 function captureIo(stdin = "") {
@@ -184,6 +193,7 @@ describe("org CLI", () => {
         "PathBindingIndex",
         "OrgEpoch",
         "OrgEpochIndex",
+        "OrgInviteClaim",
       ]);
       expect(io.out()).toContain("initialized org config");
 
@@ -733,6 +743,305 @@ describe("org epoch CLI", () => {
       expect(io.err()).toContain("epoch chain INVALID");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("org sealed invite → epoch-mint journey (two clients)", () => {
+  // Safety net: any code path that forgets an explicit --identity must never
+  // touch the real ~/.org identity.
+  let safetyDir = "";
+  let savedIdentityPath: string | undefined;
+  beforeAll(() => {
+    safetyDir = mkdtempSync(join(tmpdir(), "org-journey-safety-"));
+    savedIdentityPath = process.env.ORG_MEMBER_IDENTITY_PATH;
+    process.env.ORG_MEMBER_IDENTITY_PATH = join(safetyDir, "member-seal.json");
+  });
+  afterAll(() => {
+    if (savedIdentityPath === undefined) delete process.env.ORG_MEMBER_IDENTITY_PATH;
+    else process.env.ORG_MEMBER_IDENTITY_PATH = savedIdentityPath;
+    rmSync(safetyDir, { recursive: true, force: true });
+  });
+
+  async function setupTwoNodes() {
+    const dirA = mkdtempSync(join(tmpdir(), "org-journey-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "org-journey-b-"));
+    const configA = join(dirA, "config.json");
+    const configB = join(dirB, "config.json");
+    const identityA = join(dirA, "member-seal.json");
+    const identityB = join(dirB, "member-seal.json");
+    const clientA = memoryClient("owner-1");
+    const clientB = memoryClient("friend-1");
+    const secretsA = memorySecrets();
+    const secretsB = memorySecrets();
+    const depsA: CliDeps = { lastSecrets: secretsA, newClient: () => clientA };
+    const depsB: CliDeps = { lastSecrets: secretsB, newClient: () => clientB };
+
+    let io = captureIo();
+    expect(await run(["init", "--config", configA], io, depsA)).toBe(0);
+    io = captureIo();
+    expect(await run(["init", "--config", configB], io, depsB)).toBe(0);
+    io = captureIo();
+    expect(
+      await run(
+        [
+          "create",
+          "friends",
+          "--name",
+          "Friends",
+          "--owner-name",
+          "Owner A",
+          "--identity",
+          identityA,
+          "--config",
+          configA,
+        ],
+        io,
+        depsA,
+      ),
+    ).toBe(0);
+    expect(io.out()).toContain("signed genesis epoch=0");
+
+    // B publishes its orgpk1:… receive identity.
+    io = captureIo();
+    expect(
+      await run(["receive", "--json", "--identity", identityB, "--config", configB], io, depsB),
+    ).toBe(0);
+    const receive = JSON.parse(io.out()) as { public_key: string; fingerprint: string };
+
+    return {
+      dirA,
+      dirB,
+      configA,
+      configB,
+      identityA,
+      identityB,
+      clientA,
+      clientB,
+      secretsA,
+      secretsB,
+      depsA,
+      depsB,
+      bPubkey: receive.public_key,
+      bMemberId: receive.fingerprint,
+    };
+  }
+
+  function sealedPackageFrom(out: string): string {
+    const match = /sealed_package=(\S+)/.exec(out);
+    expect(match).not.toBeNull();
+    return match![1]!;
+  }
+
+  function acceptanceFrom(out: string): string {
+    const match = /acceptance=(orgaccept1:\S+)/.exec(out);
+    expect(match).not.toBeNull();
+    return match![1]!;
+  }
+
+  it("invite → join → accept mints epoch 1; replay and kick behave; signatures verify cross-node", async () => {
+    const t = await setupTwoNodes();
+    try {
+      // A seals an invite to B's public key.
+      let io = captureIo();
+      expect(
+        await run(
+          ["invite", "friends", "--to", t.bPubkey, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const sealed = sealedPackageFrom(io.out());
+      expect(io.err()).toContain("invite expires_at=");
+
+      // B joins through the sealed channel and gets an acceptance token back.
+      io = captureIo();
+      expect(
+        await run(
+          [
+            "join",
+            "--sealed",
+            sealed,
+            "--identity",
+            t.identityB,
+            "--member-name",
+            "Friend B",
+            "--config",
+            t.configB,
+          ],
+          io,
+          t.depsB,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("joined organization slug=friends");
+      const acceptance = acceptanceFrom(io.out());
+      expect(t.secretsB.bag.has("org-friends-e2e")).toBe(true);
+
+      // Registry on A still owner-only: membership is NOT granted by join.
+      io = captureIo();
+      expect(
+        await run(["member", "list", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("registry org=friends epoch=0");
+      expect(io.out()).not.toContain(t.bMemberId);
+
+      // Owner accepts: mints epoch 1 with B.
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "add", "friends", "--accept", acceptance, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=1");
+      expect(io.out()).toContain(t.bMemberId);
+
+      // Member list on A shows B from the canonical epoch with provenance.
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "list", "friends", "--json", "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const listed = JSON.parse(io.out()) as {
+        epoch_no: number;
+        members: {
+          member_id: string;
+          name: string;
+          sign_pk: string;
+          roles: string[];
+          status: string;
+          added_epoch: number;
+        }[];
+      };
+      expect(listed.epoch_no).toBe(1);
+      const bEntry = listed.members.find((m) => m.member_id === t.bMemberId);
+      const bIdentity = loadMemberIdentity(t.identityB);
+      expect(bEntry?.name).toBe("Friend B");
+      expect(bEntry?.roles).toEqual(["member"]);
+      expect(bEntry?.status).toBe("active");
+      expect(bEntry?.added_epoch).toBe(1);
+      expect(bEntry?.sign_pk).toBe(bIdentity.signing_public_key);
+
+      // Cross-epoch signature verification: B signs; A verifies against the
+      // sign_pk published in the canonical epoch.
+      const payload = { msg: "ref-event fixture", n: 1 };
+      const sig = signMemberPayload(bIdentity, payload);
+      expect(verifyMemberPayload(bEntry!.sign_pk, payload, sig)).toBe(true);
+      expect(verifyMemberPayload(bEntry!.sign_pk, { ...payload, n: 2 }, sig)).toBe(false);
+
+      // Replay: the same acceptance is rejected and mints nothing.
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "add", "friends", "--accept", acceptance, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(1);
+      expect(io.err()).toContain("replay");
+      io = captureIo();
+      expect(
+        await run(["epoch", "verify", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("epochs=2");
+
+      // Kick: revocation epoch, non-retroactive.
+      io = captureIo();
+      expect(
+        await run(["kick", "friends", t.bMemberId, "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=2");
+      io = captureIo();
+      expect(
+        await run(["member", "list", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("registry org=friends epoch=2");
+      expect(io.out()).toMatch(new RegExp(`member_id=${t.bMemberId} .*status=revoked`));
+
+      // Kicking again refuses (already revoked); chain still verifies.
+      io = captureIo();
+      expect(
+        await run(["kick", "friends", t.bMemberId, "--config", t.configA], io, t.depsA),
+      ).toBe(1);
+      expect(io.err()).toContain("already revoked");
+      io = captureIo();
+      expect(
+        await run(["epoch", "verify", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("epochs=3");
+    } finally {
+      rmSync(t.dirA, { recursive: true, force: true });
+      rmSync(t.dirB, { recursive: true, force: true });
+    }
+  });
+
+  it("expired invites are rejected at join and at accept with no epoch minted", async () => {
+    const t = await setupTwoNodes();
+    try {
+      let io = captureIo();
+      expect(
+        await run(
+          [
+            "invite",
+            "friends",
+            "--to",
+            t.bPubkey,
+            "--expires-in",
+            "1ms",
+            "--config",
+            t.configA,
+          ],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const sealed = sealedPackageFrom(io.out());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Join-side rejection: nothing stored on B.
+      io = captureIo();
+      expect(
+        await run(
+          ["join", "--sealed", sealed, "--identity", t.identityB, "--config", t.configB],
+          io,
+          t.depsB,
+        ),
+      ).toBe(1);
+      expect(io.err()).toContain("expired");
+      expect(t.secretsB.bag.has("org-friends-e2e")).toBe(false);
+
+      // Accept-side rejection: craft the acceptance directly from the expired
+      // invite (a joiner bypassing its own local check) — the OWNER still
+      // refuses and no epoch is minted.
+      const bIdentity = loadMemberIdentity(t.identityB);
+      const invite = unsealAnyInvite(sealed, memberPrivateKeyObject(bIdentity));
+      const forced = sealJoinAccept(
+        buildJoinAccept({ invite, identity: bIdentity }),
+        invite.e2e_key,
+      );
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "add", "friends", "--accept", forced, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(1);
+      expect(io.err()).toContain("expired");
+      expect(io.err()).toContain("no epoch minted");
+
+      io = captureIo();
+      expect(
+        await run(["epoch", "verify", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("epochs=1"); // genesis only — nothing minted
+    } finally {
+      rmSync(t.dirA, { recursive: true, force: true });
+      rmSync(t.dirB, { recursive: true, force: true });
     }
   });
 });

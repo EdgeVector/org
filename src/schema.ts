@@ -427,6 +427,51 @@ export const orgEpochIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Consumed invite-claim marker: one row per claim_nonce, written when the
+ * owner mints the membership epoch for that claim. Point-get by nonce is the
+ * replay check — a nonce with a row is spent. No enumeration, so no index
+ * companion.
+ */
+export const orgInviteClaimSchema: AddSchemaRequest = {
+  schema: {
+    name: "OrgInviteClaim",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Org Invite Claim",
+    purpose_statement:
+      "One-time invite claim consumption marker; presence of a nonce row rejects replayed acceptances",
+    schema_type: "Hash",
+    key: { hash_field: "claim_nonce" },
+    fields: ["claim_nonce", "org_hash", "member_id", "epoch_hash", "consumed_at"],
+    field_types: {
+      claim_nonce: "String",
+      org_hash: "String",
+      member_id: "String",
+      epoch_hash: "String",
+      consumed_at: "String",
+    },
+    field_descriptions: {
+      claim_nonce: "one-time invite claim nonce (primary key)",
+      org_hash: "organization the claim belonged to",
+      member_id: "member the claim admitted",
+      epoch_hash: "membership epoch minted for this claim",
+      consumed_at: "RFC 3339 timestamp the owner accepted the claim",
+    },
+    field_classifications: {
+      org_hash: ["word"],
+      member_id: ["word"],
+    },
+    field_data_classifications: {
+      claim_nonce: PUBLIC,
+      org_hash: PUBLIC,
+      member_id: PUBLIC,
+      epoch_hash: PUBLIC,
+      consumed_at: PUBLIC,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export const ALL_SCHEMAS: AddSchemaRequest[] = [
   organizationSchema,
   orgDatabaseSchema,
@@ -436,6 +481,7 @@ export const ALL_SCHEMAS: AddSchemaRequest[] = [
   pathBindingIndexSchema,
   orgEpochSchema,
   orgEpochIndexSchema,
+  orgInviteClaimSchema,
 ];
 
 export type SchemaKind =
@@ -446,7 +492,8 @@ export type SchemaKind =
   | "OrgDbIndex"
   | "PathBindingIndex"
   | "OrgEpoch"
-  | "OrgEpochIndex";
+  | "OrgEpochIndex"
+  | "OrgInviteClaim";
 
 /** Constant hash key for the single-row per-node indexes (OrgIndex, PathBindingIndex). */
 export const INDEX_SCOPE = "local";
