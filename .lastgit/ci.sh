@@ -30,7 +30,7 @@ if [ -d test ]; then
 fi
 
 # 5. venue pin
-test "$(head -n 1 .last-stack/pr-venue)" = "lastgit"
+test "$(head -n 1 .last-stack/pr-venue)" = "forgejo"
 
 # 6. mirror policy
 if [ -d .github/workflows ]; then

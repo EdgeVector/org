@@ -23,7 +23,7 @@ only as `lastsecrets://org-<slug>-e2e`.
 | | |
 |--|--|
 | **Public source / clone** | https://github.com/EdgeVector/org |
-| **Canonical review (contributors)** | LastGit `lastdb:///org` (`lastgit cr`) |
+| **Canonical review (contributors)** | LastGit `http://localhost:3300/EdgeVector/org.git` (`lastgit cr`) |
 | **Depends on** | LastDB Mini (`lastdbd`) + [LastSecrets](https://github.com/EdgeVector/lastsecrets) |
 | **Exemem account** | **Not required** for create, invite, or join |
 
