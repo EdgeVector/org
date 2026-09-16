@@ -1,5 +1,5 @@
 /**
- * Arm org cloud-sync on the local Mini node after create/join.
+ * Arm org cloud-sync on the local Mini node after `org db create`.
  *
  * Doctrine: an org DB always has a cloud backup; local writes append to the
  * org log encrypted with the org E2E key. Registration POSTs to
@@ -51,19 +51,24 @@ async function udsJson(
   path: string,
   body?: unknown,
   socketPath = defaultSocketPath(),
+  dbLocator?: string,
 ): Promise<{ status: number; json: unknown }> {
   if (!existsSync(socketPath)) {
     throw new Error(`node socket not found: ${socketPath}`);
   }
+  const headers: Record<string, string> = {
+    Host: "localhost",
+    "X-LastDB-Client": OWNER_APP_ID,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (dbLocator && dbLocator.length > 0) {
+    headers["X-LastDB-Db"] = dbLocator;
+  }
   const res = await fetch(`http://localhost${path}`, {
     method,
     unix: socketPath,
-    headers: {
-      Host: "localhost",
-      "X-LastDB-Client": OWNER_APP_ID,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   } as RequestInit & { unix: string });
   const text = await res.text();
@@ -97,6 +102,8 @@ export async function registerOrgCloudSync(input: {
   orgHash: string;
   e2eKeyB64: string;
   slug: string;
+  /** Named org DB locator. Mini rejects personal context. */
+  dbLocator: string;
   socketPath?: string;
 }): Promise<OrgSyncRegisterResult> {
   try {
@@ -109,6 +116,7 @@ export async function registerOrgCloudSync(input: {
         slug: input.slug,
       },
       input.socketPath,
+      input.dbLocator,
     );
     if (status === 404) {
       return {

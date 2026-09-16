@@ -207,6 +207,8 @@ describe("org CLI", () => {
       expect(io.out()).toContain("slug=edgevector");
       expect(secrets.bag.has("org-edgevector-e2e")).toBe(true);
       expect(secrets.bag.has("org-edgevector-private")).toBe(true);
+      expect(io.err()).not.toContain("HTTP 400");
+      expect(io.err()).not.toContain("register failed");
 
       io = captureIo();
       code = await run(
@@ -284,6 +286,8 @@ describe("org CLI", () => {
       );
       expect(code).toBe(0);
       expect(io.out()).toContain("joined organization");
+      expect(io.err()).not.toContain("HTTP 400");
+      expect(io.err()).not.toContain("register failed");
       expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(invite.e2e_key);
       expect(memberClient.store.size).toBeGreaterThan(0);
     } finally {

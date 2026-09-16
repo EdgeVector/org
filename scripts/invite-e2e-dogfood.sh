@@ -11,34 +11,43 @@ set -euo pipefail
 
 export PATH="${HOME}/.bun/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:${PATH:-}"
 unset LASTDB_DB || true
+# Debug lastdbd UDS workers overflow the default stack on schema declare.
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 
 BUN="${BUN:-$(command -v bun)}"
 LASTDBD="${LASTDBD:-$(command -v lastdbd)}"
 ROOT_REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
 ORG_CLI="${ORG_CLI:-$ROOT_REPO/src/cli.ts}"
-# Prefer sibling lastsecrets checkout, else PATH lastsecrets via bun
-if [ -z "${LS_CLI:-}" ]; then
-  if [ -f "$ROOT_REPO/../lastsecrets/src/cli.ts" ]; then
-    LS_CLI="$ROOT_REPO/../lastsecrets/src/cli.ts"
-  elif [ -f "$HOME/lastdb-apps/lastsecrets/src/cli.ts" ]; then
-    LS_CLI="$HOME/lastdb-apps/lastsecrets/src/cli.ts"
-  else
-    echo "set LS_CLI=path/to/lastsecrets/src/cli.ts" >&2
-    exit 2
-  fi
-fi
+# LS_CLI is resolved below (ts source or PATH lastsecrets).
 
 need() { command -v "$1" >/dev/null || { echo "missing $1" >&2; exit 127; }; }
 need bun
 need lastdbd
 need curl
-need python3
+need jq
 [ -f "$ORG_CLI" ] || { echo "missing ORG_CLI=$ORG_CLI" >&2; exit 2; }
-[ -f "$LS_CLI" ] || { echo "missing LS_CLI=$LS_CLI" >&2; exit 2; }
+if [ -z "${LS_CLI:-}" ]; then
+  if [ -f "$ROOT_REPO/../lastsecrets/src/cli.ts" ]; then
+    LS_CLI="$ROOT_REPO/../lastsecrets/src/cli.ts"
+  elif [ -f "$HOME/lastdb-apps/lastsecrets/src/cli.ts" ]; then
+    LS_CLI="$HOME/lastdb-apps/lastsecrets/src/cli.ts"
+  elif command -v lastsecrets >/dev/null; then
+    LS_CLI="$(command -v lastsecrets)"
+  else
+    echo "set LS_CLI=path/to/lastsecrets/src/cli.ts or install lastsecrets" >&2
+    exit 2
+  fi
+fi
 export ORG_LASTSECRETS_BIN="${ORG_LASTSECRETS_BIN:-$LS_CLI}"
 
 org_cmd() { "$BUN" "$ORG_CLI" "$@"; }
-ls_cmd() { "$BUN" "$LS_CLI" "$@"; }
+ls_cmd() {
+  if [[ "$LS_CLI" == *.ts ]]; then
+    "$BUN" "$LS_CLI" "$@"
+  else
+    "$LS_CLI" "$@"
+  fi
+}
 
 ROOT="$(mktemp -d /tmp/org-invite-dogfood.XXXXXX)"
 INVITER_HOME="$ROOT/inviter"
@@ -97,7 +106,12 @@ SOCK_I="$LASTDB_HOME/data/folddb.sock"
 
 ls_cmd init --socket "$SOCK_I"
 org_cmd init --socket "$SOCK_I"
-org_cmd create friends --name "Friends Dogfood" --socket "$SOCK_I"
+org_cmd create friends --name "Friends Dogfood" --socket "$SOCK_I" \
+  >"$ROOT/create.out" 2>"$ROOT/create.err" || fail "org create"
+grep -q "HTTP 400" "$ROOT/create.err" && fail "create printed HTTP 400" || ok "create has no HTTP 400"
+org_cmd db create friends shared --name "Shared DB" --socket "$SOCK_I" \
+  >"$ROOT/db-create.out" 2>"$ROOT/db-create.err" || fail "org db create"
+grep -q "shared" "$ROOT/db-create.out" && ok "named db friends/shared" || fail "named db create"
 
 # --- friend: install/init/register local receive identity ---
 start_node "$FRIEND_HOME" friend
@@ -108,8 +122,8 @@ SOCK_F="$LASTDB_HOME/data/folddb.sock"
 ls_cmd init --socket "$SOCK_F"
 org_cmd init --socket "$SOCK_F"
 org_cmd receive --json --socket "$SOCK_F" >"$ROOT/friend-receive.json"
-FRIEND_PUBKEY="$(python3 -c "import json; print(json.load(open('$ROOT/friend-receive.json'))['public_key'])")"
-FRIEND_FINGERPRINT="$(python3 -c "import json; print(json.load(open('$ROOT/friend-receive.json'))['fingerprint'])")"
+FRIEND_PUBKEY="$(jq -r .public_key "$ROOT/friend-receive.json")"
+FRIEND_FINGERPRINT="$(jq -r .fingerprint "$ROOT/friend-receive.json")"
 case "$FRIEND_PUBKEY" in
   orgpk1:*) ok "friend receive public key fingerprint=$FRIEND_FINGERPRINT" ;;
   *) fail "friend receive did not produce orgpk1 public key" ;;
@@ -138,7 +152,12 @@ fi
 # --- friend: join with sealed package on the same receive identity ---
 export HOME="$FRIEND_HOME"
 export LASTDB_HOME="$FRIEND_HOME/.lastdb"
-org_cmd join --sealed "$SEALED" --socket "$SOCK_F"
+org_cmd join --sealed "$SEALED" --socket "$SOCK_F" \
+  >"$ROOT/join.out" 2>"$ROOT/join.err" || fail "org join"
+grep -q "HTTP 400" "$ROOT/join.err" && fail "join printed HTTP 400" || ok "join has no HTTP 400"
+cat "$ROOT/join.out"
+org_cmd db create friends shared --name "Shared DB" --socket "$SOCK_F" \
+  >"$ROOT/friend-db-create.out" 2>"$ROOT/friend-db-create.err" || fail "friend db create"
 org_cmd list --socket "$SOCK_F" | tee "$ROOT/friend-list.txt"
 org_cmd show friends --socket "$SOCK_F" | tee "$ROOT/friend-show.txt"
 
@@ -147,13 +166,73 @@ grep -Eq 'member|Friends' "$ROOT/friend-show.txt" && ok "friend show org" || fai
 ls_cmd list --socket "$SOCK_F" | tee "$ROOT/friend-secrets.txt"
 grep -q 'org-friends-e2e' "$ROOT/friend-secrets.txt" && ok "friend lastsecrets metadata" || fail "friend secret"
 
-python3 - <<PY
-import json
-inv = json.load(open("$INVITER_HOME/.org/config.json"))
-fr = json.load(open("$FRIEND_HOME/.org/config.json"))
-assert inv["userHash"] != fr["userHash"], "identities not isolated"
-print("OK distinct identities", inv["userHash"][:12], fr["userHash"][:12])
-PY
+A_HASH="$(jq -r .userHash "$INVITER_HOME/.org/config.json")"
+B_HASH="$(jq -r .userHash "$FRIEND_HOME/.org/config.json")"
+if [ -n "$A_HASH" ] && [ "$A_HASH" != "$B_HASH" ]; then
+  ok "distinct identities ${A_HASH:0:12} ${B_HASH:0:12}"
+else
+  fail "identities not isolated"
+fi
+
+LOCATOR="lastdb://org/friends/shared"
+PROBE_SCHEMA='{
+  "namespace": "dogfoodprobe",
+  "schema": {
+    "name": "DogfoodProbeMarker",
+    "descriptive_name": "DogfoodProbeMarker",
+    "purpose_statement": "Named-locator isolation probe unique 20260916",
+    "schema_type": "Hash",
+    "key": { "hash_field": "probe_id" },
+    "fields": ["probe_id", "probe_body"],
+    "field_types": { "probe_id": "String", "probe_body": "String" },
+    "field_descriptions": { "probe_id": "marker id", "probe_body": "payload" },
+    "field_classifications": { "probe_body": ["word"] },
+    "field_data_classifications": {
+      "probe_id": { "sensitivity_level": 0, "data_domain": "metadata" },
+      "probe_body": { "sensitivity_level": 0, "data_domain": "metadata" }
+    }
+  }
+}'
+curl -sS --unix-socket "$SOCK_I" \
+  -H "Content-Type: application/json" \
+  -H "X-LastDB-Client: org-two-node-dogfood" \
+  -H "X-LastDB-Db: $LOCATOR" \
+  -d "$PROBE_SCHEMA" \
+  http://localhost/api/schemas/declare >"$ROOT/declare.json" || true
+SCHEMA_NAME="$(jq -r '.schema_name // .schema // .local_schema // empty' "$ROOT/declare.json")"
+[ -z "$SCHEMA_NAME" ] && SCHEMA_NAME="dogfoodprobe/DogfoodProbeMarker"
+# Owner catalog put is the producer for membership even if declare composed.
+curl -sS --unix-socket "$SOCK_I" \
+  -H "Content-Type: application/json" \
+  -H "X-LastDB-Client: org-two-node-dogfood" \
+  -d "{\"db_locator\":\"$LOCATOR\",\"schema_name\":\"$SCHEMA_NAME\"}" \
+  http://localhost/api/db/catalog >"$ROOT/catalog-put.json" || true
+if grep -q "$SCHEMA_NAME\|db_locator" "$ROOT/catalog-put.json"; then
+  ok "catalog put $SCHEMA_NAME"
+else
+  fail "catalog put (body=$(head -c 240 "$ROOT/catalog-put.json"))"
+fi
+
+MUTATE="$(jq -nc --arg s "$SCHEMA_NAME" '{type:"mutation",schema:$s,mutation_type:"create",key_value:{hash:"M",range:null},fields_and_values:{probe_id:"M",probe_body:"org-only-payload"}}')"
+QUERY="$(jq -nc --arg s "$SCHEMA_NAME" '{schema_name:$s,fields:["probe_body","probe_id"],filter:{HashKey:"M"},limit:10,offset:0}')"
+curl -sS --unix-socket "$SOCK_I" -H "Content-Type: application/json" \
+  -H "X-LastDB-Client: org-two-node-dogfood" -H "X-LastDB-Db: $LOCATOR" \
+  -d "$MUTATE" http://localhost/api/mutation >"$ROOT/mutate-org.json" || true
+curl -sS --unix-socket "$SOCK_I" -H "Content-Type: application/json" \
+  -H "X-LastDB-Client: org-two-node-dogfood" \
+  -d "$QUERY" http://localhost/api/query >"$ROOT/query-personal.json" || true
+curl -sS --unix-socket "$SOCK_I" -H "Content-Type: application/json" \
+  -H "X-LastDB-Client: org-two-node-dogfood" -H "X-LastDB-Db: $LOCATOR" \
+  -d "$QUERY" http://localhost/api/query >"$ROOT/query-org.json" || true
+grep -q "org-only-payload" "$ROOT/query-org.json" && ok "C: org-handle read sees marker M" \
+  || fail "C: org-handle missed M ($(head -c 200 "$ROOT/query-org.json"))"
+if grep -q "org-only-payload" "$ROOT/query-personal.json"; then
+  fail "B: personal read leaked org marker M"
+else
+  ok "B: personal read does not see org marker M"
+fi
+grep -q "catalog_membership_denied" "$ROOT/query-personal.json" \
+  && ok "personal query fail-closed or empty for org marker" || true
 
 if [ -S "$PRIMARY_SOCK" ]; then
   echo "primary health: $(curl -s --unix-socket "$PRIMARY_SOCK" http://localhost/health || echo unreachable)"
