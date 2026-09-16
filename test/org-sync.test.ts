@@ -17,6 +17,7 @@ describe("org cloud-sync client", () => {
       orgHash: "a".repeat(64),
       e2eKeyB64: Buffer.alloc(32, 1).toString("base64"),
       slug: "friends",
+      dbLocator: "lastdb://org/friends/shared",
       socketPath: "/tmp/org-sync-no-such-socket.sock",
     });
     expect(result.ok).toBe(false);
@@ -46,11 +47,13 @@ describe("org cloud-sync client", () => {
         orgHash: "a".repeat(64),
         e2eKeyB64: Buffer.alloc(32, 1).toString("base64"),
         slug: "friends",
+        dbLocator: "lastdb://org/friends/shared",
         socketPath,
       });
 
       expect(result.ok).toBe(true);
       expect(capturedHeaders!.get("X-LastDB-Client")).toBe("org");
+      expect(capturedHeaders!.get("X-LastDB-Db")).toBe("lastdb://org/friends/shared");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

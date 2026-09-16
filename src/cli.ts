@@ -19,6 +19,7 @@ import {
 import {
   formatDbLocator,
   LASTDB_DB_ENV,
+  orgDb,
   parseDbLocator,
   personalDb,
   type DbHandle,
@@ -388,16 +389,11 @@ async function cmdCreate(
   );
   await putOrgEpoch(client, config, genesis);
   io.stdout.write(`signed genesis ${formatEpochSummary(genesis)}\n`);
-
-  await armOrgCloudSync({
-    orgHash: keys.orgHash,
-    e2eKeyB64: keys.e2eKey,
-    slug,
-    socketPath: opts.socketPath ?? config.nodeSocketPath,
-    io,
-  });
   io.stdout.write(
     `tip: org db create ${slug} company && org bind ${slug} company --root ~/code/…\n`,
+  );
+  io.stderr.write(
+    "note: cloud-sync arms on `org db create` with X-LastDB-Db set to the named locator\n",
   );
   return 0;
 }
@@ -652,13 +648,9 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
 
   io.stdout.write(`joined organization ${formatOrg(org)}\n`);
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
-  await armOrgCloudSync({
-    orgHash: invite.org_hash,
-    e2eKeyB64: invite.e2e_key,
-    slug: invite.slug,
-    socketPath: opts.socketPath ?? config.nodeSocketPath,
-    io,
-  });
+  io.stderr.write(
+    "note: cloud-sync arms on `org db create` with X-LastDB-Db set to the named locator\n",
+  );
 
   // Sealed return channel: hand back our v2 signing identity so the OWNER can
   // mint the membership epoch. Membership lands only as a signed epoch — this
@@ -692,6 +684,7 @@ async function armOrgCloudSync(input: {
   orgHash: string;
   e2eKeyB64: string;
   slug: string;
+  dbLocator: string;
   socketPath?: string;
   io: Io;
 }): Promise<void> {
@@ -699,6 +692,7 @@ async function armOrgCloudSync(input: {
     orgHash: input.orgHash,
     e2eKeyB64: input.e2eKeyB64,
     slug: input.slug,
+    dbLocator: input.dbLocator,
     socketPath: input.socketPath,
   });
   if (result.ok) {
@@ -1320,18 +1314,25 @@ async function cmdSync(
     const { client, config } = await loadSession(armOpts, deps);
     const secrets = deps.lastSecrets ?? newLastSecretsCli();
     const org = await getOrganization(client, config, slug);
+    const dbSlug = rest[1] && !rest[1].startsWith("-") ? rest[1] : org.defaultDb;
+    if (!dbSlug) {
+      throw new Error(
+        "org sync arm requires a named db (org sync arm <slug> <db-slug> or org db create first)",
+      );
+    }
     const e2eKey = secrets.get(e2eSecretSlug(slug));
     await armOrgCloudSync({
       orgHash: org.orgHash,
       e2eKeyB64: e2eKey,
       slug: org.slug,
+      dbLocator: formatDbLocator(orgDb(org.slug, dbSlug)),
       socketPath: armOpts.socketPath ?? config.nodeSocketPath,
       io,
     });
     return 0;
   }
   io.stdout.write(
-    `org sync subcommands:\n  org sync status\n  org sync arm <slug>\n`,
+    `org sync subcommands:\n  org sync status\n  org sync arm <slug> [db-slug]\n`,
   );
   return 0;
 }
@@ -1383,6 +1384,17 @@ async function cmdDb(
     io.stdout.write(
       `cohabits this LastDB node under org_hash=${org.orgHash}; key material is lastsecrets only\n`,
     );
+    const secrets = deps.lastSecrets ?? newLastSecretsCli();
+    const locator = formatDbLocator(orgDb(org.slug, dbSlug));
+    const e2eKey = secrets.get(e2eSecretSlug(org.slug));
+    await armOrgCloudSync({
+      orgHash: org.orgHash,
+      e2eKeyB64: e2eKey,
+      slug: org.slug,
+      dbLocator: locator,
+      socketPath: opts.socketPath ?? config.nodeSocketPath,
+      io,
+    });
     return 0;
   }
 
@@ -1845,7 +1857,7 @@ Other:
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints membership epoch N+1
   org kick <slug> <member_id>                  # registry kick: mint revocation epoch (non-retroactive)
-  org sync status | arm <slug>                 # cloud-sync targets (auto-armed on create/join)
+  org sync status | arm <slug> [db-slug]       # cloud-sync targets (armed on org db create)
   org member list <slug> [--json]              # registry from the canonical signed epoch chain
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
   org epoch show|verify|log <slug>             # owner-signed membership epochs (see org epoch help)
