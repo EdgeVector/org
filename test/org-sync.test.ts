@@ -3,7 +3,11 @@ import { closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { listOrgCloudSyncTargets, registerOrgCloudSync } from "../src/org-sync.ts";
+import {
+  listOrgCloudSyncTargets,
+  registerOrgCloudSync,
+  shareOrgSchema,
+} from "../src/org-sync.ts";
 
 describe("org cloud-sync client", () => {
   const originalFetch = globalThis.fetch;
@@ -77,6 +81,53 @@ describe("org cloud-sync client", () => {
 
       expect(result.sync_enabled).toBe(true);
       expect(capturedHeaders!.get("X-LastDB-Client")).toBe("org");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("share-schema posts named X-LastDB-Db and personal source", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-share-test-"));
+    const socketPath = join(dir, "folddb.sock");
+    closeSync(openSync(socketPath, "w"));
+    let capturedHeaders: Headers;
+    let capturedUrl: string;
+    let capturedBody: string;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedHeaders = new Headers(init?.headers);
+      capturedBody = String(init?.body ?? "");
+      return new Response(
+        JSON.stringify({
+          source_db_locator: "lastdb://personal",
+          target_entry: {
+            db_locator: "lastdb://org/friends/shared",
+            schema_name: "dogfoodprobe/DogfoodProbeMarker",
+            instance_id: null,
+          },
+          molecules_wrapped: 2,
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await shareOrgSchema({
+        dbLocator: "lastdb://org/friends/shared",
+        schemaName: "dogfoodprobe/DogfoodProbeMarker",
+        orgHash: "ab".repeat(32),
+        e2eKeyB64: Buffer.alloc(32, 2).toString("base64"),
+        socketPath,
+      });
+      expect(result.ok).toBe(true);
+      expect(capturedUrl!).toContain("/api/db/catalog/share");
+      expect(capturedHeaders!.get("X-LastDB-Client")).toBe("org");
+      expect(capturedHeaders!.get("X-LastDB-Db")).toBe("lastdb://org/friends/shared");
+      const body = JSON.parse(capturedBody!);
+      expect(body.source_db_locator).toBe("lastdb://personal");
+      expect(body.schema_name).toBe("dogfoodprobe/DogfoodProbeMarker");
+      expect(body.access_domain).toBe(`org:${"ab".repeat(32)}`);
+      expect(body.domain_wrap_key_hex).toBe("02".repeat(32));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
