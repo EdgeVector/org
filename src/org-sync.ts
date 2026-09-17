@@ -23,6 +23,17 @@ export type OrgSyncRegisterResult = {
   error?: string;
 };
 
+export type OrgShareSchemaResult = {
+  ok: boolean;
+  source_db_locator?: string;
+  target_db_locator?: string;
+  schema_name?: string;
+  instance_id?: string | null;
+  molecules_wrapped?: number;
+  skipped?: string;
+  error?: string;
+};
+
 export type OrgSyncTargetsResult = {
   targets: Array<{
     org_hash: string;
@@ -142,6 +153,80 @@ export async function registerOrgCloudSync(input: {
         ? (data.target_prefixes as string[])
         : undefined,
       note: typeof data.note === "string" ? data.note : undefined,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, skipped: msg };
+  }
+}
+
+/**
+ * Share one schema instance into a named org DB by catalog reference.
+ * Soft-fails when the node is old or offline.
+ */
+export async function shareOrgSchema(input: {
+  dbLocator: string;
+  schemaName: string;
+  orgHash: string;
+  e2eKeyB64: string;
+  sourceDbLocator?: string;
+  socketPath?: string;
+}): Promise<OrgShareSchemaResult> {
+  const wrapBytes = Buffer.from(input.e2eKeyB64, "base64");
+  if (wrapBytes.length !== 32) {
+    return {
+      ok: false,
+      error: `org E2E key must be 32 bytes, got ${wrapBytes.length}`,
+    };
+  }
+  try {
+    const { status, json } = await udsJson(
+      "POST",
+      "/api/db/catalog/share",
+      {
+        source_db_locator: input.sourceDbLocator ?? "lastdb://personal",
+        schema_name: input.schemaName,
+        access_domain: `org:${input.orgHash}`,
+        domain_wrap_key_hex: wrapBytes.toString("hex"),
+      },
+      input.socketPath,
+      input.dbLocator,
+    );
+    if (status === 404) {
+      return {
+        ok: false,
+        skipped:
+          "node does not support /api/db/catalog/share yet (upgrade lastdbd / fold)",
+      };
+    }
+    if (status >= 400) {
+      const data = unwrapEnvelope(json);
+      return {
+        ok: false,
+        error: String(data.error ?? data.message ?? `HTTP ${status}`),
+      };
+    }
+    const data = unwrapEnvelope(json);
+    const target =
+      data.target_entry && typeof data.target_entry === "object"
+        ? (data.target_entry as Record<string, unknown>)
+        : {};
+    return {
+      ok: true,
+      source_db_locator:
+        typeof data.source_db_locator === "string"
+          ? data.source_db_locator
+          : input.sourceDbLocator ?? "lastdb://personal",
+      target_db_locator:
+        typeof target.db_locator === "string" ? target.db_locator : input.dbLocator,
+      schema_name:
+        typeof target.schema_name === "string" ? target.schema_name : input.schemaName,
+      instance_id:
+        typeof target.instance_id === "string" || target.instance_id === null
+          ? (target.instance_id as string | null)
+          : undefined,
+      molecules_wrapped:
+        typeof data.molecules_wrapped === "number" ? data.molecules_wrapped : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

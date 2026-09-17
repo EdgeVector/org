@@ -103,6 +103,7 @@ import {
   listOrgCloudSyncTargets,
   registerOrgCloudSync,
   revokeOrgCloudMember,
+  shareOrgSchema,
   type OrgSyncRegisterResult,
 } from "./org-sync.ts";
 import { isMetaCommand, usageWrapperLine, wrapApp } from "./wrapper.ts";
@@ -1398,6 +1399,41 @@ async function cmdDb(
     return 0;
   }
 
+  if (sub === "share-schema") {
+    const [orgSlug, dbSlug, schemaName, ...more] = rest;
+    if (!orgSlug || !dbSlug || !schemaName) {
+      throw new Error(
+        "usage: org db share-schema <org-slug> <db-slug> <schema> [--source lastdb://personal]",
+      );
+    }
+    const opts = parseOptions(more);
+    const { client, config } = await loadSession(opts, deps);
+    const org = await getOrganization(client, config, orgSlug);
+    const secrets = deps.lastSecrets ?? newLastSecretsCli();
+    const e2eKey = secrets.get(e2eSecretSlug(org.slug));
+    const locator = formatDbLocator(orgDb(org.slug, dbSlug));
+    const source = typeof opts.source === "string" ? opts.source : "lastdb://personal";
+    const result = await shareOrgSchema({
+      dbLocator: locator,
+      schemaName,
+      orgHash: org.orgHash,
+      e2eKeyB64: e2eKey,
+      sourceDbLocator: source,
+      socketPath: opts.socketPath ?? config.nodeSocketPath,
+    });
+    if (result.skipped) {
+      io.stderr.write(`org db share-schema skipped: ${result.skipped}\n`);
+      return 0;
+    }
+    if (!result.ok) {
+      throw new Error(result.error ?? "share-schema failed");
+    }
+    io.stdout.write(
+      `shared ${result.schema_name} into ${result.target_db_locator} from ${result.source_db_locator}\n`,
+    );
+    return 0;
+  }
+
   if (sub === "list") {
     const [orgSlug, ...more] = rest;
     const opts = parseOptions(more);
@@ -1621,6 +1657,7 @@ type Options = {
   config?: string;
   nodeUrl?: string;
   socketPath?: string;
+  source?: string;
   name?: string;
   description?: string;
   out?: string;
@@ -1735,6 +1772,9 @@ function parseOptions(args: string[]): Options {
       case "--socket":
       case "--socket-path":
         opts.socketPath = next();
+        break;
+      case "--source":
+        opts.source = next();
         break;
       case "--name":
         opts.name = next();
@@ -1877,6 +1917,7 @@ Env: ${LASTDB_DB_ENV} is set when wrapping apps (and --db is injected).
 function dbUsage(): string {
   return `org db subcommands:
   org db create <org-slug> <db-slug> [--name N] [--description D]
+  org db share-schema <org-slug> <db-slug> <schema> [--source lastdb://personal]
   org db list [org-slug]
   org db show <org-slug> <db-slug>
 `;
