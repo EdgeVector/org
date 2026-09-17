@@ -412,7 +412,8 @@ org show ${slug}
 \`org join\` prints a line starting with \`acceptance=orgaccept1:…\`. Send that
 full token back to the org admin over any channel (it contains no secrets).
 The admin runs \`org member add ${slug} --accept '<token>'\` to add you to the
-signed member registry. You are not in the registry until they do.
+signed member registry and grant your Mini principal on the org cloud head.
+You are not in the registry until they do.
 
 ## Done when
 

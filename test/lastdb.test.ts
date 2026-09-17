@@ -34,6 +34,48 @@ describe("LastDB client headers", () => {
     expect(capturedHeaders!.get("X-User-Hash")).toBe("user-1");
   });
 
+  it("reads Mini user_hash from GET /api/status (nested or top-level)", async () => {
+    const nested: FetchImpl = async (url) => {
+      expect(String(url)).toContain("/api/status");
+      return new Response(
+        JSON.stringify({ status: { user_hash: "74f4c062f1277268e287f078e072af83" } }),
+        { status: 200 },
+      );
+    };
+    const nestedClient = newLastDbClient({
+      socketPath: "/tmp/org-test.sock",
+      fetchImpl: nested,
+    });
+    expect(await nestedClient.nodeUserHash()).toBe("74f4c062f1277268e287f078e072af83");
+
+    const top: FetchImpl = async () =>
+      new Response(JSON.stringify({ user_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }), {
+        status: 200,
+      });
+    const topClient = newLastDbClient({
+      socketPath: "/tmp/org-test.sock",
+      fetchImpl: top,
+    });
+    expect(await topClient.nodeUserHash()).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("falls back to auto-identity when /api/status has no user_hash", async () => {
+    const fetchImpl: FetchImpl = async (url) => {
+      const path = String(url);
+      if (path.includes("/api/status")) {
+        return new Response(JSON.stringify({ status: { uptime_s: 1 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ user_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }), {
+        status: 200,
+      });
+    };
+    const client = newLastDbClient({
+      socketPath: "/tmp/org-test.sock",
+      fetchImpl,
+    });
+    expect(await client.nodeUserHash()).toBe("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
   it("labels SDK data-path calls with the org LastDB client header", async () => {
     const dir = mkdtempSync(join(tmpdir(), "org-lastdb-test-"));
     const socketPath = join(dir, "folddb.sock");

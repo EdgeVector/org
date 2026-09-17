@@ -7,6 +7,7 @@ import {
   buildJoinAccept,
   isJoinAcceptToken,
   joinAcceptExpired,
+  normalizeMiniUserHash,
   sealJoinAccept,
   unsealJoinAccept,
 } from "../src/join-accept.ts";
@@ -140,5 +141,34 @@ describe("join acceptance", () => {
     expect(() =>
       buildJoinAccept({ invite: legacy as typeof invite, identity }),
     ).toThrow(/claim_nonce/);
+  });
+
+  it("round-trips optional Mini user_hash and omits it when absent", () => {
+    const { invite } = inviteFixture();
+    const identity = generateMemberSealIdentity();
+    const withHash = buildJoinAccept({
+      invite,
+      identity,
+      userHash: "74f4c062f1277268e287f078e072af83",
+    });
+    expect(withHash.payload.user_hash).toBe("74f4c062f1277268e287f078e072af83");
+    const opened = unsealJoinAccept(sealJoinAccept(withHash, invite.e2e_key), invite.e2e_key);
+    expect(opened.payload.user_hash).toBe("74f4c062f1277268e287f078e072af83");
+
+    const without = buildJoinAccept({ invite, identity });
+    expect(without.payload.user_hash).toBeUndefined();
+    const openedWithout = unsealJoinAccept(
+      sealJoinAccept(without, invite.e2e_key),
+      invite.e2e_key,
+    );
+    expect(openedWithout.payload.user_hash).toBeUndefined();
+  });
+
+  it("normalizeMiniUserHash drops empty, whitespace, and over-long values", () => {
+    expect(normalizeMiniUserHash("  abcdef12  ")).toBe("abcdef12");
+    expect(normalizeMiniUserHash("")).toBeUndefined();
+    expect(normalizeMiniUserHash("has space")).toBeUndefined();
+    expect(normalizeMiniUserHash("x".repeat(129))).toBeUndefined();
+    expect(normalizeMiniUserHash(undefined)).toBeUndefined();
   });
 });

@@ -193,7 +193,8 @@ Live download/upload of an org cloud head is gated by **Exemem principal
 membership** (registry on the head id), not by possession of the shared E2E key.
 
 ```bash
-# after friend joins locally, grant their Mini user_hash live cloud access:
+# after friend joins, owner `org member add` grants their Mini user_hash
+# (join-accept carries user_hash from GET /api/status). Manual fallback:
 org member grant edgevector <their_user_hash> --role writer
 
 # kick — they keep local data + E2E key, but cloud presigns stop:

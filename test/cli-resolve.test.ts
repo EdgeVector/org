@@ -41,6 +41,9 @@ function memoryClient(): LastDbClient & { store: Map<string, QueryRow> } {
     async autoIdentity() {
       return { userHash: "u1" };
     },
+    async nodeUserHash() {
+      return "u1";
+    },
     async declareAppSchema(_a, schema) {
       n++;
       return { canonical: `hash-${schema.name}-${n}`, schemaName: `org/${schema.name}` };

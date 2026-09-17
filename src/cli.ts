@@ -38,6 +38,7 @@ import {
 import {
   buildJoinAccept,
   joinAcceptExpired,
+  normalizeMiniUserHash,
   sealJoinAccept,
   unsealJoinAccept,
 } from "./join-accept.ts";
@@ -47,7 +48,12 @@ import {
   unsealAnyInvite,
 } from "./invite-seal.ts";
 import { newInviteTransport, type InviteTransport } from "./invite-transport.ts";
-import { defaultNodeUrl, newLastDbClient, resolveSocketPath } from "./lastdb.ts";
+import {
+  defaultNodeUrl,
+  newLastDbClient,
+  resolveSocketPath,
+  type LastDbClient,
+} from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
 import {
   defaultMemberIdentityPath,
@@ -128,6 +134,8 @@ export type CliDeps = {
   wrapApp?: typeof wrapApp;
   /** Override cwd for resolve (tests). */
   cwd?: string;
+  /** Override Exemem principal grant (tests). */
+  grantOrgCloudMember?: typeof grantOrgCloudMember;
 };
 
 export async function run(
@@ -585,6 +593,63 @@ async function cmdReceive(opts: Options, io: Io, deps: CliDeps): Promise<number>
   return 0;
 }
 
+/** Live Mini user_hash for the join-accept payload. Prefer GET /api/status. */
+async function joinerMiniUserHash(
+  client: LastDbClient,
+): Promise<string | undefined> {
+  if (typeof client.nodeUserHash === "function") {
+    try {
+      const fromStatus = normalizeMiniUserHash(await client.nodeUserHash());
+      if (fromStatus) return fromStatus;
+    } catch {
+      // Fall through to auto-identity.
+    }
+  }
+  try {
+    return normalizeMiniUserHash((await client.autoIdentity()).userHash);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Owner grants the joiner's Mini principal on the org head after minting
+ * the membership epoch. Grant failure does not undo the epoch — print the
+ * hard next step so a later `org member grant` can finish the cloud path.
+ */
+async function grantJoinAcceptPrincipal(input: {
+  slug: string;
+  orgHash: string;
+  userHash: string | undefined;
+  socketPath?: string;
+  io: Io;
+  deps: CliDeps;
+}): Promise<void> {
+  const userHash = normalizeMiniUserHash(input.userHash);
+  if (!userHash) {
+    input.io.stderr.write(
+      `note: acceptance carried no Mini user_hash; next: org member grant ${input.slug} <friend Mini user_hash>\n`,
+    );
+    return;
+  }
+  const grant = input.deps.grantOrgCloudMember ?? grantOrgCloudMember;
+  const result = await grant({
+    orgHash: input.orgHash,
+    targetUserHash: userHash,
+    role: "writer",
+    socketPath: input.socketPath,
+  });
+  if (result.ok) {
+    input.io.stdout.write(
+      `granted cloud access org=${input.slug} principal=${result.principal_hash ?? userHash} role=${result.role ?? "writer"}\n`,
+    );
+    return;
+  }
+  input.io.stderr.write(
+    `cloud grant failed: ${result.error ?? "unknown"}; next: org member grant ${input.slug} ${userHash}\n`,
+  );
+}
+
 async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
   const modes = [opts.from, opts.claim, opts.sealed].filter(Boolean);
   if (modes.length === 0) {
@@ -660,10 +725,12 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     const identity = loadOrCreateMemberIdentity(
       opts.identityPath ?? defaultMemberIdentityPath(),
     );
+    const userHash = await joinerMiniUserHash(client);
     const accept = buildJoinAccept({
       invite,
       identity,
       ...(opts.memberName !== undefined ? { memberName: opts.memberName } : {}),
+      ...(userHash ? { userHash } : {}),
     });
     const token = sealJoinAccept(accept, invite.e2e_key);
     io.stdout.write(
@@ -671,8 +738,17 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     );
     io.stdout.write(`acceptance=${token}\n`);
     io.stdout.write(
-      `admin runs: org member add ${invite.slug} --accept '${token.slice(0, 24)}…'  (full token)\n`,
+      `next: org member add ${invite.slug} --accept '<paste acceptance=>'\n`,
     );
+    if (userHash) {
+      io.stdout.write(
+        `joiner Mini user_hash=${userHash} (owner grant happens on member add; no org member grant)\n`,
+      );
+    } else {
+      io.stderr.write(
+        `note: could not read Mini user_hash from /api/status; after member add run: org member grant ${invite.slug} <friend Mini user_hash>\n`,
+      );
+    }
   } else {
     io.stderr.write(
       "note: invite carried no claim_nonce (older CLI); you joined locally but the admin must mint your registry epoch from a fresh invite\n",
@@ -730,7 +806,7 @@ async function cmdMember(
   if (!sub || sub === "help" || sub === "--help") {
     io.stdout.write(
       "org member list <slug> [--json]        # registry from the canonical signed epoch\n" +
-        "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]  # owner mints epoch N+1\n" +
+        "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]  # owner mints epoch N+1 and grants Mini principal\n" +
         "org member grant <slug> <user_hash> [--role writer|reader]\n" +
         "org member revoke <slug> <user_hash>\n" +
         "org member leave <slug>\n",
@@ -811,6 +887,14 @@ async function cmdMember(
     io.stdout.write(
       `added ${member.member_id} name=${JSON.stringify(member.name)} role=${member.roles[0]} — signed ${formatEpochSummary(epoch)}\n`,
     );
+    await grantJoinAcceptPrincipal({
+      slug,
+      orgHash: org.orgHash,
+      userHash: accept.payload.user_hash,
+      socketPath: addOpts.socketPath ?? config.nodeSocketPath,
+      io,
+      deps,
+    });
     return 0;
   }
   if (sub === "list") {
@@ -1895,7 +1979,7 @@ Other:
   org join --sealed orgseal1:… [--member-name N]  # join; prints acceptance=orgaccept1:… to send back
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
-  org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints membership epoch N+1
+  org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints epoch N+1 + grants Mini principal
   org kick <slug> <member_id>                  # registry kick: mint revocation epoch (non-retroactive)
   org sync status | arm <slug> [db-slug]       # cloud-sync targets (armed on org db create)
   org member list <slug> [--json]              # registry from the canonical signed epoch chain

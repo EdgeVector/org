@@ -48,6 +48,12 @@ export type JoinAcceptPayload = {
     seal_pk: string;
   };
   issued_at: string;
+  /**
+   * Optional Mini `user_hash` from the joiner node (`GET /api/status`).
+   * The owner uses this on `org member add` to grant Exemem principal
+   * membership on the org head. Absent on older joiners.
+   */
+  user_hash?: string;
 };
 
 export type JoinAccept = {
@@ -64,11 +70,26 @@ function acceptAesKey(e2eKeyB64: string): Buffer {
   return createHash("sha256").update(e2e).update(ACCEPT_KDF_INFO).digest();
 }
 
+/**
+ * Normalize a Mini user_hash for the join-accept payload.
+ * Empty, whitespace, or over-long values are omitted (grant stays fail-closed).
+ */
+export function normalizeMiniUserHash(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > 128 || /\s/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
 /** Build and self-sign the acceptance from an unsealed invite + local identity. */
 export function buildJoinAccept(input: {
   invite: OrgInvite;
   identity: MemberSealIdentity;
   memberName?: string;
+  /** Joiner Mini user_hash (`GET /api/status`); omitted when unknown. */
+  userHash?: string;
 }): JoinAccept {
   if (!input.invite.claim_nonce) {
     throw new Error(
@@ -76,6 +97,7 @@ export function buildJoinAccept(input: {
     );
   }
   const fingerprint = memberFingerprint(input.identity);
+  const userHash = normalizeMiniUserHash(input.userHash);
   const payload: JoinAcceptPayload = {
     v: ACCEPT_VERSION,
     org_hash: input.invite.org_hash,
@@ -89,6 +111,7 @@ export function buildJoinAccept(input: {
       seal_pk: memberPubkeyLine(input.identity),
     },
     issued_at: new Date().toISOString(),
+    ...(userHash ? { user_hash: userHash } : {}),
   };
   return { payload, sig: signMemberPayload(input.identity, payload) };
 }
@@ -218,6 +241,13 @@ function assertAcceptShape(raw: unknown): JoinAccept {
       throw new Error(`acceptance member missing field: ${key}`);
     }
   }
+  let userHash: string | undefined;
+  if (Object.prototype.hasOwnProperty.call(payload, "user_hash")) {
+    if (typeof payload.user_hash !== "string" || payload.user_hash.length === 0) {
+      throw new Error("acceptance user_hash must be a non-empty string when present");
+    }
+    userHash = payload.user_hash;
+  }
   // Round-trip through JCS to guarantee the signature target is well-formed.
   canonicalizeJcs(payload);
   return {
@@ -234,6 +264,7 @@ function assertAcceptShape(raw: unknown): JoinAccept {
         seal_pk: m.seal_pk as string,
       },
       issued_at: payload.issued_at as string,
+      ...(userHash ? { user_hash: userHash } : {}),
     },
     sig: r.sig as string,
   };

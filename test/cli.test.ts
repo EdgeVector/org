@@ -58,6 +58,9 @@ function memoryClient(userHash = "user-1"): LastDbClient & {
     async autoIdentity() {
       return { userHash };
     },
+    async nodeUserHash() {
+      return userHash;
+    },
     async declareAppSchema(_appId, schema) {
       schemaCounter += 1;
       const canonical = `hash-${schema.name}-${schemaCounter}`;
@@ -778,7 +781,23 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
     const clientB = memoryClient("friend-1");
     const secretsA = memorySecrets();
     const secretsB = memorySecrets();
-    const depsA: CliDeps = { lastSecrets: secretsA, newClient: () => clientA };
+    const grants: Array<{ orgHash: string; targetUserHash: string; role?: string }> = [];
+    const depsA: CliDeps = {
+      lastSecrets: secretsA,
+      newClient: () => clientA,
+      grantOrgCloudMember: async (input) => {
+        grants.push({
+          orgHash: input.orgHash,
+          targetUserHash: input.targetUserHash,
+          role: input.role,
+        });
+        return {
+          ok: true,
+          role: input.role ?? "writer",
+          principal_hash: input.targetUserHash,
+        };
+      },
+    };
     const depsB: CliDeps = { lastSecrets: secretsB, newClient: () => clientB };
 
     let io = captureIo();
@@ -826,6 +845,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
       secretsB,
       depsA,
       depsB,
+      grants,
       bPubkey: receive.public_key,
       bMemberId: receive.fingerprint,
     };
@@ -878,6 +898,8 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
         ),
       ).toBe(0);
       expect(io.out()).toContain("joined organization slug=friends");
+      expect(io.out()).toContain("joiner Mini user_hash=friend-1");
+      expect(io.out()).toContain("next: org member add friends --accept");
       const acceptance = acceptanceFrom(io.out());
       expect(t.secretsB.bag.has("org-friends-e2e")).toBe(true);
 
@@ -900,6 +922,15 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
       ).toBe(0);
       expect(io.out()).toContain("signed epoch=1");
       expect(io.out()).toContain(t.bMemberId);
+      expect(io.out()).toContain("granted cloud access org=friends principal=friend-1 role=writer");
+      expect(t.grants).toEqual([
+        {
+          orgHash: expect.any(String),
+          targetUserHash: "friend-1",
+          role: "writer",
+        },
+      ]);
+      expect(t.grants[0]!.orgHash.length).toBe(64);
 
       // Member list on A shows B from the canonical epoch with provenance.
       io = captureIo();
@@ -1043,6 +1074,100 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
         await run(["epoch", "verify", "friends", "--config", t.configA], io, t.depsA),
       ).toBe(0);
       expect(io.out()).toContain("epochs=1"); // genesis only — nothing minted
+    } finally {
+      rmSync(t.dirA, { recursive: true, force: true });
+      rmSync(t.dirB, { recursive: true, force: true });
+    }
+  });
+
+  it("member add still mints the epoch when cloud grant fails and prints the next grant step", async () => {
+    const t = await setupTwoNodes();
+    t.depsA.grantOrgCloudMember = async () => ({
+      ok: false,
+      error: "principal is not registered for this db_hash",
+    });
+    try {
+      let io = captureIo();
+      expect(
+        await run(
+          ["invite", "friends", "--to", t.bPubkey, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const sealed = sealedPackageFrom(io.out());
+      io = captureIo();
+      expect(
+        await run(
+          [
+            "join",
+            "--sealed",
+            sealed,
+            "--identity",
+            t.identityB,
+            "--config",
+            t.configB,
+          ],
+          io,
+          t.depsB,
+        ),
+      ).toBe(0);
+      const acceptance = acceptanceFrom(io.out());
+
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "add", "friends", "--accept", acceptance, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=1");
+      expect(io.err()).toContain("cloud grant failed");
+      expect(io.err()).toContain("next: org member grant friends friend-1");
+
+      io = captureIo();
+      expect(
+        await run(["member", "list", "friends", "--config", t.configA], io, t.depsA),
+      ).toBe(0);
+      expect(io.out()).toContain("registry org=friends epoch=1");
+    } finally {
+      rmSync(t.dirA, { recursive: true, force: true });
+      rmSync(t.dirB, { recursive: true, force: true });
+    }
+  });
+
+  it("member add without user_hash on the token prints the grant next step", async () => {
+    const t = await setupTwoNodes();
+    try {
+      let io = captureIo();
+      expect(
+        await run(
+          ["invite", "friends", "--to", t.bPubkey, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const sealed = sealedPackageFrom(io.out());
+      const bIdentity = loadMemberIdentity(t.identityB);
+      const invite = unsealAnyInvite(sealed, memberPrivateKeyObject(bIdentity));
+      const token = sealJoinAccept(
+        buildJoinAccept({ invite, identity: bIdentity }),
+        invite.e2e_key,
+      );
+
+      io = captureIo();
+      expect(
+        await run(
+          ["member", "add", "friends", "--accept", token, "--config", t.configA],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      expect(io.out()).toContain("signed epoch=1");
+      expect(io.err()).toContain("acceptance carried no Mini user_hash");
+      expect(io.err()).toContain("next: org member grant friends <friend Mini user_hash>");
+      expect(t.grants).toEqual([]);
     } finally {
       rmSync(t.dirA, { recursive: true, force: true });
       rmSync(t.dirB, { recursive: true, force: true });

@@ -50,6 +50,11 @@ export type VerifyDistributionReadyResult = {
 
 export type LastDbClient = {
   autoIdentity(): Promise<{ userHash: string }>;
+  /**
+   * Live Mini user_hash from GET /api/status. Falls back to auto-identity.
+   * Returns undefined when the node has no identity yet.
+   */
+  nodeUserHash(): Promise<string | undefined>;
   declareAppSchema(
     appId: string,
     schema: SchemaDefinition,
@@ -218,17 +223,34 @@ export function newLastDbClient(opts: {
     return parsed;
   };
 
+  const autoIdentityFn = async (): Promise<{ userHash: string }> => {
+    const body = await callJson("/api/system/auto-identity", "GET");
+    const userHash = objectString(body, "user_hash");
+    if (!userHash) {
+      throw new OrgError(
+        "auto_identity_bad_response",
+        "LastDB auto-identity response did not include user_hash.",
+      );
+    }
+    return { userHash };
+  };
+
   return {
-    async autoIdentity() {
-      const body = await callJson("/api/system/auto-identity", "GET");
-      const userHash = objectString(body, "user_hash");
-      if (!userHash) {
-        throw new OrgError(
-          "auto_identity_bad_response",
-          "LastDB auto-identity response did not include user_hash.",
-        );
+    autoIdentity: autoIdentityFn,
+    async nodeUserHash() {
+      try {
+        const body = await callJson("/api/status", "GET");
+        const fromStatus = userHashFromStatusBody(body);
+        if (fromStatus) return fromStatus;
+      } catch {
+        // Fall through to auto-identity (older Mini, or /api/status missing).
       }
-      return { userHash };
+      try {
+        const id = await autoIdentityFn();
+        return id.userHash;
+      } catch {
+        return undefined;
+      }
     },
     async declareAppSchema(appId, schema) {
       // Supported app-facing path (sop-register-app-schemas-on-lastdb-node):
@@ -457,6 +479,16 @@ function objectString(value: unknown, key: string): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
+}
+
+/** Pull Mini user_hash from GET /api/status (top-level or nested under status). */
+function userHashFromStatusBody(body: unknown): string | undefined {
+  const top = objectString(body, "user_hash");
+  if (top) return top;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const nested = (body as Record<string, unknown>).status;
+  const fromNested = objectString(nested, "user_hash");
+  return fromNested || undefined;
 }
 
 function unwrapData(body: unknown): Record<string, unknown> {

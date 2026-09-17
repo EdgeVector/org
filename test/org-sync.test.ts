@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  grantOrgCloudMember,
   listOrgCloudSyncTargets,
   registerOrgCloudSync,
   shareOrgSchema,
@@ -128,6 +129,39 @@ describe("org cloud-sync client", () => {
       expect(body.schema_name).toBe("dogfoodprobe/DogfoodProbeMarker");
       expect(body.access_domain).toBe(`org:${"ab".repeat(32)}`);
       expect(body.domain_wrap_key_hex).toBe("02".repeat(32));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("grant-member posts target_user_hash as writer by default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-grant-test-"));
+    const socketPath = join(dir, "folddb.sock");
+    closeSync(openSync(socketPath, "w"));
+    let capturedUrl: string;
+    let capturedBody: string;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedBody = String(init?.body ?? "");
+      return new Response(
+        JSON.stringify({ ok: true, role: "writer", principal_hash: "friend-1" }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await grantOrgCloudMember({
+        orgHash: "ab".repeat(32),
+        targetUserHash: "friend-1",
+        socketPath,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.role).toBe("writer");
+      expect(capturedUrl!).toContain("/api/org/sync/grant-member");
+      const body = JSON.parse(capturedBody!);
+      expect(body.org_hash).toBe("ab".repeat(32));
+      expect(body.target_user_hash).toBe("friend-1");
+      expect(body.role).toBe("writer");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

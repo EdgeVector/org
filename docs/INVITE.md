@@ -106,8 +106,15 @@ org member list friends
 
 Membership lands **only** as an owner-signed epoch in the org's registry
 chain — there is no mutable member row. Each acceptance is one-time: a
-replayed token is rejected and no epoch is minted. To remove someone from the
-registry later:
+replayed token is rejected and no epoch is minted.
+
+When the join-accept carries the friend's Mini `user_hash` (from
+`GET /api/status`), `org member add` also grants that principal as writer on
+the org cloud head. No separate `org member grant` is required. If the token
+has no `user_hash`, the command prints
+`next: org member grant friends <friend Mini user_hash>`.
+
+To remove someone from the registry later:
 
 ```bash
 org kick friends <member_id>       # revocation epoch (non-retroactive)
