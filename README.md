@@ -23,7 +23,7 @@ only as `lastsecrets://org-<slug>-e2e`.
 | | |
 |--|--|
 | **Public source / clone** | https://github.com/EdgeVector/org |
-| **Canonical review (contributors)** | LastGit `http://localhost:3300/EdgeVector/org.git` (`lastgit cr`) |
+| **Canonical review (contributors)** | Forgejo `http://localhost:3300/EdgeVector/org.git` |
 | **Depends on** | LastDB Mini (`lastdbd`) + [LastSecrets](https://github.com/EdgeVector/lastsecrets) |
 | **Exemem account** | **Not required** for create, invite, or join |
 
@@ -208,6 +208,27 @@ Requires a Mini with cloud sync enabled and a storage_service build that
 implements `register_db_member` / `unregister_db_member`. Create/join still
 stores the E2E key in LastSecrets either way.
 
+### Cloud membership kick proof
+
+The live proof uses two throwaway Minis and two Exemem principals. It grants
+the member, checks list or presign access, revokes the member, checks HTTP 403,
+checks owner access, and checks that the shared E2E key stays unchanged.
+
+Run the canonical proof from a Last Stack checkout after the DEV cloud deploy:
+
+```bash
+export ORG_CLOUD_MEMBERSHIP_ORG_SLUG=<slug>
+export ORG_CLOUD_MEMBERSHIP_MEMBER_USER_HASH=<member-user-hash>
+export ORG_CLOUD_MEMBERSHIP_OWNER_API_KEY_REF=lastsecrets://<owner-api-key>
+export ORG_CLOUD_MEMBERSHIP_MEMBER_API_KEY_REF=lastsecrets://<member-api-key>
+export ORG_CLOUD_MEMBERSHIP_STORAGE_URL=https://<dev-storage-host>
+export ORG_CLOUD_MEMBERSHIP_OWNER_SOCKET=<throwaway-owner-socket>
+last-stack-north-star-proof --live north-star-org-cloud-principal-membership
+```
+
+Use `lastsecrets://` locators only. The proof does not print or store secret
+values, and it must never use the primary `~/.lastdb` socket.
+
 ## What works today vs later
 
 | Works now | Needs more setup / later |
@@ -253,8 +274,8 @@ LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
 # expect: VERDICT: GREEN
 ```
 
-EdgeVector contributors: ship via LastGit (`lastgit cr`), not GitHub PRs.
-See `.last-stack/pr-venue` and `.lastgit/ci.sh`.
+EdgeVector contributors: ship via Forgejo, not GitHub PRs. See
+`.last-stack/pr-venue` and `.lastgit/ci.sh`.
 
 ---
 
