@@ -76,6 +76,54 @@ describe("LastDB client headers", () => {
     expect(await client.nodeUserHash()).toBe("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
   });
 
+  it("reads shared schema names and loads only those schemas", async () => {
+    const socketPath = "/tmp/org-test.sock";
+    const requested: string[][] = [];
+    const fetchImpl: FetchImpl = async (url, init) => {
+      const path = String(url);
+      if (path.includes("/api/org/sync/targets")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              targets: [
+                {
+                  org_hash: "org-a",
+                  unprefixed_schema_names: ["ns2probe/Ns2Marker", ""],
+                },
+                {
+                  org_hash: "org-b",
+                  unprefixed_schema_names: ["not-shared/Other"],
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      expect(path).toContain("/api/schemas/load");
+      requested.push(JSON.parse(String(init?.body)).schemas);
+      return new Response(
+        JSON.stringify({
+          data: {
+            available_schemas_loaded: 1,
+            schemas_loaded_to_db: 1,
+            failed_schemas: [],
+          },
+        }),
+        { status: 200 },
+      );
+    };
+    const client = newLastDbClient({ socketPath, fetchImpl });
+
+    expect(await client.sharedSchemaNames!("org-a")).toEqual(["ns2probe/Ns2Marker"]);
+    await expect(client.loadSchemas!(["ns2probe/Ns2Marker", "ns2probe/Ns2Marker", " "])).resolves.toEqual({
+      availableSchemasLoaded: 1,
+      schemasLoadedToDb: 1,
+      failedSchemas: [],
+    });
+    expect(requested).toEqual([["ns2probe/Ns2Marker"]]);
+  });
+
   it("labels SDK data-path calls with the org LastDB client header", async () => {
     const dir = mkdtempSync(join(tmpdir(), "org-lastdb-test-"));
     const socketPath = join(dir, "folddb.sock");

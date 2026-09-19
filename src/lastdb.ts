@@ -48,6 +48,13 @@ export type VerifyDistributionReadyResult = {
   ready: boolean;
 };
 
+export type LoadSchemasResult = {
+  availableSchemasLoaded: number;
+  schemasLoadedToDb: number;
+  failedSchemas: string[];
+  skipped?: string;
+};
+
 export type LastDbClient = {
   autoIdentity(): Promise<{ userHash: string }>;
   /**
@@ -72,6 +79,10 @@ export type LastDbClient = {
     appId: string,
     schemaIdentities: string[],
   ): Promise<VerifyDistributionReadyResult>;
+  /** Return shared schema names recorded by org cloud-sync targets. */
+  sharedSchemaNames?(orgHash: string): Promise<string[]>;
+  /** Load only the requested published schemas into this Mini. */
+  loadSchemas?(schemaNames: string[]): Promise<LoadSchemasResult>;
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -338,6 +349,47 @@ export function newLastDbClient(opts: {
         ready,
       };
     },
+    async sharedSchemaNames(orgHash) {
+      const body = await callJson("/api/org/sync/targets", "GET");
+      const data = unwrapData(body);
+      if (!Array.isArray(data.targets)) return [];
+      const names = (data.targets as unknown[]).flatMap((raw) => {
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+        const target = raw as Record<string, unknown>;
+        if (target.org_hash !== orgHash) return [];
+        return Array.isArray(target.unprefixed_schema_names)
+          ? target.unprefixed_schema_names.filter(
+              (name): name is string => typeof name === "string" && name.trim().length > 0,
+            )
+          : [];
+      });
+      return [...new Set(names)];
+    },
+    async loadSchemas(schemaNames) {
+      const requested = [...new Set(schemaNames.map((name) => name.trim()).filter(Boolean))];
+      if (requested.length === 0) {
+        return { availableSchemasLoaded: 0, schemasLoadedToDb: 0, failedSchemas: [] };
+      }
+      try {
+        const body = await callJson("/api/schemas/load", "POST", { schemas: requested });
+        const data = unwrapData(body);
+        return {
+          availableSchemasLoaded: objectNumber(data, "available_schemas_loaded"),
+          schemasLoadedToDb: objectNumber(data, "schemas_loaded_to_db"),
+          failedSchemas: objectStringArray(data, "failed_schemas"),
+        };
+      } catch (err) {
+        if (err instanceof OrgError && err.code === "node_http_404") {
+          return {
+            availableSchemasLoaded: 0,
+            schemasLoadedToDb: 0,
+            failedSchemas: [],
+            skipped: "Mini does not support /api/schemas/load yet",
+          };
+        }
+        throw err;
+      }
+    },
     async createRecord({ schemaHash, fields, keyHash }) {
       await sdkDataPath((client) =>
         client.mutate(schemaHash, {
@@ -453,6 +505,7 @@ function routeSocketPathFor(method: string, path: string, socketPath: string): s
     (method === "POST" && path === "/api/apps/declare-schema") ||
     (method === "POST" && path === "/api/apps/register-for-distribution") ||
     (method === "POST" && path === "/api/apps/verify-distribution-ready") ||
+    (method === "POST" && path === "/api/schemas/load") ||
     (method === "GET" && (path === "/api/schemas" || path === "/api/system/auto-identity"))
   ) {
     return socketPath;
@@ -479,6 +532,18 @@ function objectString(value: unknown, key: string): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
+}
+
+function objectNumber(value: Record<string, unknown>, key: string): number {
+  const raw = value[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+
+function objectStringArray(value: Record<string, unknown>, key: string): string[] {
+  const raw = value[key];
+  return Array.isArray(raw)
+    ? raw.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 /** Pull Mini user_hash from GET /api/status (top-level or nested under status). */

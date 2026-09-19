@@ -465,6 +465,16 @@ async function cmdInvite(
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
   const org = await getOrganization(client, config, slug);
   const databases = await listOrgDatabases(client, config, org.slug);
+  let schemaNames: string[] = [];
+  if (typeof client.sharedSchemaNames === "function") {
+    try {
+      schemaNames = await client.sharedSchemaNames(org.orgHash);
+    } catch (err) {
+      io.stderr.write(
+        `note: could not read shared schema identities for the invite (${err instanceof Error ? err.message : String(err)})\n`,
+      );
+    }
+  }
   const pathBindings = (await listPathBindings(client, config))
     .filter((binding) => binding.orgSlug === org.slug)
     .map((binding) => ({ root: binding.root, db_slug: binding.dbSlug }));
@@ -483,6 +493,7 @@ async function cmdInvite(
       description: db.description,
       created_by: db.createdBy,
     })),
+    ...(schemaNames.length > 0 ? { schemaNames } : {}),
     pathBindings,
     ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
   });
@@ -826,6 +837,33 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
         dbSlug: binding.db_slug,
         orgHash: org.orgHash,
       });
+    }
+  }
+
+  const sharedSchemaNames = new Set(invite.schema_names ?? []);
+  if (typeof client.sharedSchemaNames === "function") {
+    try {
+      for (const name of await client.sharedSchemaNames(invite.org_hash)) {
+        sharedSchemaNames.add(name);
+      }
+    } catch (err) {
+      io.stderr.write(
+        `note: could not read restored shared schema identities (${err instanceof Error ? err.message : String(err)})\n`,
+      );
+    }
+  }
+  if (sharedSchemaNames.size > 0 && typeof client.loadSchemas === "function") {
+    const loaded = await client.loadSchemas([...sharedSchemaNames]);
+    if (loaded.skipped) {
+      io.stderr.write(`note: shared schema load skipped (${loaded.skipped})\n`);
+    } else if (loaded.failedSchemas.length > 0) {
+      io.stderr.write(
+        `shared schema load failed for: ${loaded.failedSchemas.join(", ")}\n`,
+      );
+    } else {
+      io.stdout.write(
+        `loaded shared schema identities=${loaded.schemasLoadedToDb}/${sharedSchemaNames.size}\n`,
+      );
     }
   }
 
