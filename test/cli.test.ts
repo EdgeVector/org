@@ -822,6 +822,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
     const secretsA = memorySecrets();
     const secretsB = memorySecrets();
     const grants: Array<{ orgHash: string; targetUserHash: string; role?: string }> = [];
+    const revokes: Array<{ orgHash: string; targetUserHash?: string }> = [];
     const depsA: CliDeps = {
       lastSecrets: secretsA,
       newClient: () => clientA,
@@ -836,6 +837,10 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
           role: input.role ?? "writer",
           principal_hash: input.targetUserHash,
         };
+      },
+      revokeOrgCloudMember: async (input) => {
+        revokes.push({ orgHash: input.orgHash, targetUserHash: input.targetUserHash });
+        return { ok: true };
       },
     };
     const depsB: CliDeps = { lastSecrets: secretsB, newClient: () => clientB };
@@ -886,6 +891,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
       depsA,
       depsB,
       grants,
+      revokes,
       bPubkey: receive.public_key,
       bMemberId: receive.fingerprint,
     };
@@ -1021,6 +1027,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
         },
       ]);
       expect(t.grants[0]!.orgHash.length).toBe(64);
+      const friendE2eKey = t.secretsB.bag.get("org-friends-e2e");
 
       // Member list on A shows B from the canonical epoch with provenance.
       io = captureIo();
@@ -1040,6 +1047,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
           roles: string[];
           status: string;
           added_epoch: number;
+          cloud_user_hash?: string;
         }[];
       };
       expect(listed.epoch_no).toBe(1);
@@ -1050,6 +1058,7 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
       expect(bEntry?.status).toBe("active");
       expect(bEntry?.added_epoch).toBe(1);
       expect(bEntry?.sign_pk).toBe(bIdentity.signing_public_key);
+      expect(bEntry?.cloud_user_hash).toBe("friend-1");
 
       // Cross-epoch signature verification: B signs; A verifies against the
       // sign_pk published in the canonical epoch.
@@ -1080,6 +1089,11 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
         await run(["kick", "friends", t.bMemberId, "--config", t.configA], io, t.depsA),
       ).toBe(0);
       expect(io.out()).toContain("signed epoch=2");
+      expect(io.out()).toContain("revoked cloud access org=friends principal=friend-1");
+      expect(t.revokes).toEqual([
+        { orgHash: expect.any(String), targetUserHash: "friend-1" },
+      ]);
+      expect(t.secretsB.bag.get("org-friends-e2e")).toBe(friendE2eKey);
       io = captureIo();
       expect(
         await run(["member", "list", "friends", "--config", t.configA], io, t.depsA),
