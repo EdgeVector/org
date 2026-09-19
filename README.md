@@ -105,6 +105,23 @@ org show friends
 The friend **does not** need an Exemem account. You only need their `orgpk1:…`
 public key (from `org receive` on their machine).
 
+For a stranger, mint a non-secret connection-bootstrapping link:
+
+```bash
+org invite friends --link --agent
+```
+
+The link carries only public organization metadata, a correlation ID, and an
+expiry. It never carries the org E2E key. After the recipient installs Org and
+consents, the local response is:
+
+```bash
+org link accept 'https://thelastdb.com/join/<org-intent-token>'
+```
+
+The connection service uses the `orgreply1:…` response to deliver the sealed
+invite through its encrypted mailbox. This path avoids a pasted sealed blob.
+
 ### 1) Friend — install + show public key
 
 ```bash
@@ -174,7 +191,9 @@ Resolution order: **explicit `--db` → cwd under a bound root (longest prefix)
 | `org create <slug>` | New org + LastSecrets E2E/private keys |
 | `org list` / `org show <slug>` | Metadata only (no raw keys) |
 | `org receive` | Print local `orgpk1:…` public key |
+| `org link accept <URL>` | Consent to a non-secret human sharing link |
 | `org invite <slug> --to orgpk1:… [--agent]` | Seal invite to friend pubkey (preferred) |
+| `org invite <slug> --link [--link-base URL]` | Mint a non-secret human sharing link |
 | `org invite <slug> --out FILE [--agent]` | Secret invite file (OOB only) |
 | `org join --sealed orgseal1:…` | Join from pubkey-sealed package |
 | `org join --from FILE` | Join from secret invite file |

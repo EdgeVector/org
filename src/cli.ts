@@ -36,6 +36,13 @@ import {
   type OrgInvite,
 } from "./invite.ts";
 import {
+  buildHumanInviteLinkInstructions,
+  buildOrgInviteLink,
+  buildOrgInviteLinkResponse,
+  orgInviteLinkExpired,
+  parseOrgInviteLink,
+} from "./invite-link.ts";
+import {
   buildJoinAccept,
   joinAcceptExpired,
   normalizeMiniUserHash,
@@ -191,6 +198,10 @@ export async function run(
 
     if (command === "receive") {
       return await cmdReceive(parseOptions([arg, ...tail].filter(Boolean) as string[]), io, deps);
+    }
+
+    if (command === "link") {
+      return await cmdLink(arg, tail, io, deps);
     }
 
     if (command === "join") {
@@ -476,6 +487,30 @@ async function cmdInvite(
     throw new Error("invite --to cannot be combined with --out; use one delivery path");
   }
 
+  if (opts.link) {
+    if (opts.to || opts.out || opts.outSealed) {
+      throw new Error("invite --link cannot be combined with --to, --out, or --out-sealed");
+    }
+    const { intent, url } = buildOrgInviteLink({
+      orgSlug: org.slug,
+      orgName: org.name,
+      orgHash: org.orgHash,
+      senderIdentity: config.userHash,
+      senderPublicKey: org.orgPublicKey,
+      ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
+      linkBase: opts.linkBase,
+    });
+    if (opts.json) {
+      io.stdout.write(`${JSON.stringify({ intent, url }, null, 2)}\n`);
+    } else {
+      io.stdout.write(buildHumanInviteLinkInstructions({ intent, url }));
+    }
+    io.stderr.write(
+      `org-intent correlation=${intent.correlation_id} expires_at=${intent.expires_at}; no E2E key is present in the link\n`,
+    );
+    return 0;
+  }
+
   if (opts.to) {
     // Preferred: encrypt-to friend orgpk1:… public key (clear-channel safe).
     if (isMemberPubkey(opts.to)) {
@@ -598,6 +633,49 @@ async function cmdReceive(opts: Options, io: Io, deps: CliDeps): Promise<number>
   } else {
     io.stdout.write(formatReceiveBanner(id));
   }
+  return 0;
+}
+
+async function cmdLink(
+  sub: string | undefined,
+  rest: string[],
+  io: Io,
+  _deps: CliDeps,
+): Promise<number> {
+  if (!sub || sub === "help" || sub === "--help") {
+    io.stdout.write(
+      "org link accept <URL> [--json]  # consent to a non-secret org sharing link\n",
+    );
+    return 0;
+  }
+  if (sub !== "accept") {
+    throw new Error(`unknown link subcommand: ${sub}`);
+  }
+  const link = rest[0];
+  if (!link || link.startsWith("-")) {
+    throw new Error("usage: org link accept <URL> [--json]");
+  }
+  const opts = parseOptions(rest.slice(1));
+  const intent = parseOrgInviteLink(link);
+  if (orgInviteLinkExpired(intent)) {
+    throw new Error(
+      `org invite link for ${intent.org_slug} expired at ${intent.expires_at}; ask the sender for a fresh link`,
+    );
+  }
+  const identity = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
+  const { response, token } = buildOrgInviteLinkResponse(intent, memberPubkeyLine(identity));
+  if (opts.json) {
+    io.stdout.write(`${JSON.stringify({ intent, response, token }, null, 2)}\n`);
+    return 0;
+  }
+  io.stdout.write(
+    `org sharing request from ${intent.sender_identity} for ${JSON.stringify(intent.org_name)}\n`,
+  );
+  io.stdout.write(
+    "Share your information to let the sender send the encrypted invite through the connection mailbox.\n",
+  );
+  io.stdout.write(`response=${token}\n`);
+  io.stdout.write("Send this response to the sender's connection service.\n");
   return 0;
 }
 
@@ -1794,6 +1872,10 @@ type Options = {
   force?: boolean;
   /** Invite lifetime like 30s/15m/72h/14d for `org invite --expires-in`. */
   expiresIn?: string;
+  /** Mint a non-secret org-intent link for human or connection-service onboarding. */
+  link?: boolean;
+  /** Base URL for the non-secret org-intent link. */
+  linkBase?: string;
   /** Display name the joiner proposes for itself (`org join --member-name`). */
   memberName?: string;
   /** orgaccept1:… token for `org member add --accept`. */
@@ -1948,6 +2030,12 @@ function parseOptions(args: string[]): Options {
       case "--expires-in":
         opts.expiresIn = next();
         break;
+      case "--link":
+        opts.link = true;
+        break;
+      case "--link-base":
+        opts.linkBase = next();
+        break;
       case "--member-name":
         opts.memberName = next();
         break;
@@ -1995,7 +2083,9 @@ Other:
   org list | show <slug>
   org receive                                  # print my orgpk1:… public key (ready for invite)
   org receive --sealed orgseal1:…              # accept pubkey-sealed package
+  org link accept <URL> [--json]              # consent to a non-secret sharing link
   org invite <slug> --to orgpk1:… [--agent]    # encrypt invite to friend pubkey (clear-channel OK)
+  org invite <slug> --link [--link-base URL]    # mint a non-secret human sharing link
   org invite <slug> --out invite.json          # secret file fallback (raw e2e; transfer OOB)
   org invite <slug> --agent [--out path]       # pasteable agent instructions + secret file
   org invite <slug> … --expires-in 72h         # invite lifetime (default 72h; one-time claim)
