@@ -7,6 +7,7 @@ import {
   grantOrgCloudMember,
   listOrgCloudSyncTargets,
   registerOrgCloudSync,
+  revokeOrgCloudMember,
   shareOrgSchema,
 } from "../src/org-sync.ts";
 
@@ -162,6 +163,34 @@ describe("org cloud-sync client", () => {
       expect(body.org_hash).toBe("ab".repeat(32));
       expect(body.target_user_hash).toBe("friend-1");
       expect(body.role).toBe("writer");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("revoke-member posts target_user_hash without changing local key state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-revoke-test-"));
+    const socketPath = join(dir, "folddb.sock");
+    closeSync(openSync(socketPath, "w"));
+    let capturedUrl: string;
+    let capturedBody: string;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const result = await revokeOrgCloudMember({
+        orgHash: "ab".repeat(32),
+        targetUserHash: "friend-1",
+        socketPath,
+      });
+      expect(result.ok).toBe(true);
+      expect(capturedUrl!).toContain("/api/org/sync/revoke-member");
+      const body = JSON.parse(capturedBody!);
+      expect(body.org_hash).toBe("ab".repeat(32));
+      expect(body.target_user_hash).toBe("friend-1");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
