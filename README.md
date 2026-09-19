@@ -23,7 +23,7 @@ only as `lastsecrets://org-<slug>-e2e`.
 | | |
 |--|--|
 | **Public source / clone** | https://github.com/EdgeVector/org |
-| **Canonical review (contributors)** | LastGit `http://localhost:3300/EdgeVector/org.git` (`lastgit cr`) |
+| **Canonical review (contributors)** | Forgejo `http://localhost:3300/EdgeVector/org.git` |
 | **Depends on** | LastDB Mini (`lastdbd`) + [LastSecrets](https://github.com/EdgeVector/lastsecrets) |
 | **Exemem account** | **Not required** for create, invite, or join |
 
@@ -274,8 +274,8 @@ LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
 # expect: VERDICT: GREEN
 ```
 
-EdgeVector contributors: ship via LastGit (`lastgit cr`), not GitHub PRs.
-See `.last-stack/pr-venue` and `.lastgit/ci.sh`.
+EdgeVector contributors: ship via Forgejo, not GitHub PRs. See
+`.last-stack/pr-venue` and `.lastgit/ci.sh`.
 
 ---
 

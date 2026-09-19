@@ -31,6 +31,6 @@ org db create edgevector company --name "Company DB"
 ## Venue
 
 - **Public install mirror:** `https://github.com/EdgeVector/org` (invitees).
-- **Contributor review:** LastGit `http://localhost:3300/EdgeVector/org.git` (`.last-stack/pr-venue` =
-  `lastgit`, gate `.lastgit/ci.sh`). Prefer LastGit CRs for product changes;
-  keep GitHub main in sync as the public download surface.
+- **Contributor review:** Forgejo `http://localhost:3300/EdgeVector/org.git`
+  (`.last-stack/pr-venue` = `forgejo`, gate `.lastgit/ci.sh`). Use the local
+  Forgejo API for product PRs. GitHub is a read-only public mirror.
