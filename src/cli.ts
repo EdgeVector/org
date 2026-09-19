@@ -451,6 +451,7 @@ async function cmdInvite(
   const { client, config } = await loadSession(opts, deps);
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
   const org = await getOrganization(client, config, slug);
+  const databases = await listOrgDatabases(client, config, org.slug);
   const e2eKey = secrets.get(e2eSecretSlug(slug));
   const invite = buildInvite({
     slug: org.slug,
@@ -459,6 +460,13 @@ async function cmdInvite(
     orgPublicKey: org.orgPublicKey,
     e2eKey,
     createdBy: config.userHash,
+    defaultDb: org.defaultDb || undefined,
+    databases: databases.map((db) => ({
+      db_slug: db.dbSlug,
+      name: db.name,
+      description: db.description,
+      created_by: db.createdBy,
+    })),
     ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
   });
   io.stderr.write(
@@ -709,10 +717,25 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     orgPublicKey: invite.org_public_key,
     e2eKeyRef: e2eKeyRef(invite.slug),
     role: "member",
+    ...(invite.default_db ? { defaultDb: invite.default_db } : {}),
     createdBy: invite.created_by,
   });
 
+  for (const database of invite.databases ?? []) {
+    await putOrgDatabase(client, config, {
+      orgSlug: org.slug,
+      dbSlug: database.db_slug,
+      name: database.name,
+      description: database.description,
+      orgHash: org.orgHash,
+      createdBy: database.created_by,
+    });
+  }
+
   io.stdout.write(`joined organization ${formatOrg(org)}\n`);
+  if (invite.databases && invite.databases.length > 0) {
+    io.stdout.write(`reconstructed named databases=${invite.databases.length}\n`);
+  }
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
   io.stderr.write(
     "note: cloud-sync arms on `org db create` with X-LastDB-Db set to the named locator\n",
