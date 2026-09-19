@@ -463,6 +463,9 @@ async function cmdInvite(
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
   const org = await getOrganization(client, config, slug);
   const databases = await listOrgDatabases(client, config, org.slug);
+  const pathBindings = (await listPathBindings(client, config))
+    .filter((binding) => binding.orgSlug === org.slug)
+    .map((binding) => ({ root: binding.root, db_slug: binding.dbSlug }));
   const e2eKey = secrets.get(e2eSecretSlug(slug));
   const invite = buildInvite({
     slug: org.slug,
@@ -478,6 +481,7 @@ async function cmdInvite(
       description: db.description,
       created_by: db.createdBy,
     })),
+    pathBindings,
     ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
   });
   io.stderr.write(
@@ -809,10 +813,26 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
       createdBy: database.created_by,
     });
   }
+  if (invite.path_bindings && invite.path_bindings.length > 0) {
+    if (!config.schemas.PathBinding) {
+      throw new Error("PathBinding schema not initialized. Re-run `org init`.");
+    }
+    for (const binding of invite.path_bindings) {
+      await putPathBinding(client, config, {
+        root: binding.root,
+        orgSlug: org.slug,
+        dbSlug: binding.db_slug,
+        orgHash: org.orgHash,
+      });
+    }
+  }
 
   io.stdout.write(`joined organization ${formatOrg(org)}\n`);
   if (invite.databases && invite.databases.length > 0) {
     io.stdout.write(`reconstructed named databases=${invite.databases.length}\n`);
+  }
+  if (invite.path_bindings && invite.path_bindings.length > 0) {
+    io.stdout.write(`reconstructed path bindings=${invite.path_bindings.length}\n`);
   }
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
   io.stderr.write(

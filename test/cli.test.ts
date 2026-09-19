@@ -231,6 +231,23 @@ describe("org CLI", () => {
       expect(code).toBe(0);
       expect(io.out()).toContain("edgevector/company");
 
+      const bindRoot = join(dir, "shared-project");
+      io = captureIo();
+      code = await run(
+        [
+          "bind",
+          "edgevector",
+          "company",
+          "--root",
+          bindRoot,
+          "--config",
+          configPath,
+        ],
+        io,
+        deps,
+      );
+      expect(code).toBe(0);
+
       io = captureIo();
       code = await run(
         ["invite", "edgevector", "--out", invitePath, "--config", configPath],
@@ -241,6 +258,9 @@ describe("org CLI", () => {
       const invite = JSON.parse(readFileSync(invitePath, "utf8"));
       expect(invite.slug).toBe("edgevector");
       expect(invite.e2e_key).toBe(secrets.bag.get("org-edgevector-e2e"));
+      expect(invite.path_bindings).toEqual([
+        { root: bindRoot, db_slug: "company" },
+      ]);
 
       const agentInvitePath = join(dir, "agent-invite.json");
       io = captureIo();
@@ -290,6 +310,7 @@ describe("org CLI", () => {
       expect(code).toBe(0);
       expect(io.out()).toContain("joined organization");
       expect(io.out()).toContain("reconstructed named databases=1");
+      expect(io.out()).toContain("reconstructed path bindings=1");
       expect(io.err()).not.toContain("HTTP 400");
       expect(io.err()).not.toContain("register failed");
       expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(invite.e2e_key);
@@ -303,6 +324,15 @@ describe("org CLI", () => {
       );
       expect(code).toBe(0);
       expect(io.out()).toContain("edgevector/company");
+
+      io = captureIo();
+      code = await run(
+        ["resolve", "--cwd", bindRoot, "--config", configPath],
+        io,
+        memberDeps,
+      );
+      expect(code).toBe(0);
+      expect(io.out().trim()).toBe("lastdb://org/edgevector/company");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
