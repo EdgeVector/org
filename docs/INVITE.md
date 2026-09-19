@@ -42,6 +42,41 @@ curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
 
 ## Preferred handshake
 
+### Human link path
+
+For a stranger, the sender can mint a connection-bootstrapping link:
+
+```bash
+org invite friends --link --agent
+```
+
+The link is an `org-intent` URL. It contains the organization name, the
+sender's public identity, a correlation ID, and an expiry. It never contains
+the org E2E key or an invite JSON document.
+
+The recipient opens the link. If the Org app is not installed, the link shows
+the public install instructions. After setup, the recipient consents with:
+
+```bash
+org link accept 'https://thelastdb.com/join/<org-intent-token>'
+```
+
+This command creates a local `orgpk1:…` identity and a non-secret
+`orgreply1:…` response. The connection service uses the correlation ID and
+recipient public key to send the encrypted invite through its mailbox. The
+recipient does not paste an `orgseal1:…` package and the link never carries
+the org key.
+
+Use `--json` when an installed connection service needs the intent and reply
+as structured data:
+
+```bash
+org link accept 'https://thelastdb.com/join/<org-intent-token>' --json
+```
+
+The existing public-key path below remains available for a direct manual
+handoff.
+
 ### 1) You → friend: install pointer
 
 ```text

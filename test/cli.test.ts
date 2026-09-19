@@ -873,6 +873,56 @@ describe("org sealed invite → epoch-mint journey (two clients)", () => {
     return match![1]!;
   }
 
+  it("human link invite keeps the key out of the link and creates a public reply", async () => {
+    const t = await setupTwoNodes();
+    try {
+      let io = captureIo();
+      expect(
+        await run(
+          [
+            "invite",
+            "friends",
+            "--link",
+            "--agent",
+            "--link-base",
+            "https://example.test/join",
+            "--config",
+            t.configA,
+          ],
+          io,
+          t.depsA,
+        ),
+      ).toBe(0);
+      const e2eKey = t.secretsA.bag.get("org-friends-e2e")!;
+      expect(io.out()).toContain("https://example.test/join/");
+      expect(io.out()).toContain("one-click org sharing request");
+      expect(io.out()).not.toContain(e2eKey);
+
+      const link = io.out().match(/https:\/\/example\.test\/join\/\S+/)?.[0];
+      expect(link).toBeTruthy();
+
+      io = captureIo();
+      expect(
+        await run(
+          ["link", "accept", link!, "--json", "--identity", t.identityB],
+          io,
+          t.depsB,
+        ),
+      ).toBe(0);
+      const accepted = JSON.parse(io.out()) as {
+        token: string;
+        response: { correlation_id: string; recipient_public_key: string };
+      };
+      expect(accepted.token.startsWith("orgreply1:")).toBe(true);
+      expect(accepted.response.correlation_id).toMatch(/^org-intent-/);
+      expect(accepted.response.recipient_public_key).toBe(t.bPubkey);
+      expect(io.out()).not.toContain(e2eKey);
+    } finally {
+      rmSync(t.dirA, { recursive: true, force: true });
+      rmSync(t.dirB, { recursive: true, force: true });
+    }
+  });
+
   it("invite → join → accept mints epoch 1; replay and kick behave; signatures verify cross-node", async () => {
     const t = await setupTwoNodes();
     try {
