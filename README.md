@@ -216,6 +216,9 @@ membership** (registry on the head id), not by possession of the shared E2E key.
 # (join-accept carries user_hash from GET /api/status). Manual fallback:
 org member grant edgevector <their_user_hash> --role writer
 
+# kick revokes the recorded cloud principal and keeps the shared E2E key
+org kick edgevector <member_id>
+
 # kick — they keep local data + E2E key, but cloud presigns stop:
 org member revoke edgevector <their_user_hash>
 

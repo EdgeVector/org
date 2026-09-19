@@ -35,6 +35,8 @@ export type EpochMember = {
   sign_pk: string;
   /** orgpk1:… X25519 seal public key (invite recipient key). */
   seal_pk: string;
+  /** Mini cloud principal used for live org access grant and revoke. */
+  cloud_user_hash?: string;
   roles: string[];
   status: EpochMemberStatus;
 };

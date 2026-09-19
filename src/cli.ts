@@ -143,6 +143,8 @@ export type CliDeps = {
   cwd?: string;
   /** Override Exemem principal grant (tests). */
   grantOrgCloudMember?: typeof grantOrgCloudMember;
+  /** Override Exemem principal revoke (tests). */
+  revokeOrgCloudMember?: typeof revokeOrgCloudMember;
 };
 
 export async function run(
@@ -974,6 +976,7 @@ async function cmdMember(
       name: addOpts.name ?? accept.payload.member.name,
       sign_pk: accept.payload.member.sign_pk,
       seal_pk: sealParsed.encoded,
+      ...(accept.payload.user_hash ? { cloud_user_hash: accept.payload.user_hash } : {}),
       roles: [addOpts.role ?? "member"],
       status: "active",
     };
@@ -1334,8 +1337,8 @@ function revokeMember(members: EpochMember[], memberId: string): void {
 
 /**
  * Registry kick: mint a revocation epoch (status revoked, non-retroactive —
- * events authorized by earlier epochs stay valid). Cloud transport kick is
- * the separate `org member revoke` lever.
+ * events authorized by earlier epochs stay valid) and revoke the recorded
+ * Mini cloud principal without rotating the shared E2E key.
  */
 async function cmdKick(
   slug: string | undefined,
@@ -1350,6 +1353,17 @@ async function cmdKick(
   const opts = parseOptions(rest.slice(1));
   const { client, config } = await loadSession(opts, deps);
   const org = await getOrganization(client, config, slug);
+  const resolved = await loadEpochChain(client, config, org, io);
+  if (!resolved.ok || !resolved.tip) {
+    throw new Error(
+      `refusing to kick from an unverifiable chain: ${resolved.error ?? "no canonical epoch"}`,
+    );
+  }
+  const target = resolved.tip.payload.members.find((member) => member.member_id === memberId);
+  if (!target) throw new Error(`member not found in registry: ${memberId}`);
+  if (target.status === "revoked") {
+    throw new Error(`member already revoked: ${memberId}`);
+  }
   const epoch = await mintNextEpoch({
     client,
     config,
@@ -1364,9 +1378,27 @@ async function cmdKick(
   io.stdout.write(
     `kicked ${memberId} from the ${org.slug} registry — signed ${formatEpochSummary(epoch)}\n`,
   );
-  io.stdout.write(
-    `note: revocation is non-retroactive; to also stop their live cloud sync run: org member revoke ${org.slug} <user_hash>\n`,
-  );
+  if (target.cloud_user_hash) {
+    const revoke = deps.revokeOrgCloudMember ?? revokeOrgCloudMember;
+    const result = await revoke({
+      orgHash: org.orgHash,
+      targetUserHash: target.cloud_user_hash,
+      socketPath: opts.socketPath ?? config.nodeSocketPath,
+    });
+    if (result.ok) {
+      io.stdout.write(
+        `revoked cloud access org=${org.slug} principal=${target.cloud_user_hash}\n`,
+      );
+    } else {
+      io.stderr.write(
+        `cloud revoke failed: ${result.error ?? "unknown"}; next: org member revoke ${org.slug} ${target.cloud_user_hash}\n`,
+      );
+    }
+  } else {
+    io.stderr.write(
+      `note: member ${memberId} has no recorded Mini user_hash; to stop their live cloud sync run: org member revoke ${org.slug} <user_hash>\n`,
+    );
+  }
   return 0;
 }
 
@@ -2113,7 +2145,7 @@ Other:
   org join --from invite.json
   org join --claim CLAIM_TOKEN                 # legacy portable bearer token
   org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints epoch N+1 + grants Mini principal
-  org kick <slug> <member_id>                  # registry kick: mint revocation epoch (non-retroactive)
+  org kick <slug> <member_id>                  # revoke registry + cloud principal; keep shared E2E key
   org sync status | arm <slug> [db-slug]       # cloud-sync targets (armed on org db create)
   org member list <slug> [--json]              # registry from the canonical signed epoch chain
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]

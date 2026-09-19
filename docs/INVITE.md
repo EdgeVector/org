@@ -152,8 +152,8 @@ has no `user_hash`, the command prints
 To remove someone from the registry later:
 
 ```bash
-org kick friends <member_id>       # revocation epoch (non-retroactive)
-org member revoke friends <hash>   # separate lever: stop their live cloud sync
+org kick friends <member_id>       # revocation epoch + cloud revoke; no E2E rotation
+org member revoke friends <hash>   # manual fallback when no principal is recorded
 ```
 
 ---
