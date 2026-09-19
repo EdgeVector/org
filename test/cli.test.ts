@@ -289,10 +289,20 @@ describe("org CLI", () => {
       );
       expect(code).toBe(0);
       expect(io.out()).toContain("joined organization");
+      expect(io.out()).toContain("reconstructed named databases=1");
       expect(io.err()).not.toContain("HTTP 400");
       expect(io.err()).not.toContain("register failed");
       expect(memberSecrets.bag.get("org-edgevector-e2e")).toBe(invite.e2e_key);
       expect(memberClient.store.size).toBeGreaterThan(0);
+
+      io = captureIo();
+      code = await run(
+        ["db", "list", "edgevector", "--config", configPath],
+        io,
+        memberDeps,
+      );
+      expect(code).toBe(0);
+      expect(io.out()).toContain("edgevector/company");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

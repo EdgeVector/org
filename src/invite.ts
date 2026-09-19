@@ -8,6 +8,14 @@ export const INVITE_VERSION = 1 as const;
 /** Default invite lifetime when `--expires-in` is not given. */
 export const DEFAULT_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
 
+/** Non-secret named database metadata carried in a join invite. */
+export type OrgInviteDatabase = {
+  db_slug: string;
+  name: string;
+  description: string;
+  created_by: string;
+};
+
 /**
  * One-time join bundle. Contains the raw e2e_key so a peer can join without
  * sharing LastSecrets. After join, the key is stored via lastsecrets put and
@@ -29,6 +37,10 @@ export type OrgInvite = {
   e2e_key: string;
   created_by: string;
   issued_at: string;
+  /** Default named database from the inviter's local organization record. */
+  default_db?: string;
+  /** Named databases that existed when the inviter issued the invite. */
+  databases?: OrgInviteDatabase[];
   /** RFC 3339 expiry; join and accept both reject after this instant. */
   expires_at?: string;
   /** One-time claim nonce (hex); consumed by the owner at accept. */
@@ -46,6 +58,8 @@ export function buildInvite(input: {
   orgPublicKey: string;
   e2eKey: string;
   createdBy: string;
+  defaultDb?: string;
+  databases?: OrgInviteDatabase[];
   /** Milliseconds until expiry; defaults to DEFAULT_INVITE_TTL_MS. */
   ttlMs?: number;
   now?: Date;
@@ -68,6 +82,8 @@ export function buildInvite(input: {
     e2e_key: input.e2eKey,
     created_by: input.createdBy,
     issued_at: now.toISOString(),
+    ...(input.defaultDb ? { default_db: assertSlug(input.defaultDb, "default db slug") } : {}),
+    ...(input.databases ? { databases: input.databases.map((db) => ({ ...db })) } : {}),
     expires_at: new Date(now.getTime() + ttlMs).toISOString(),
     claim_nonce: newInviteClaimNonce(),
   };
@@ -114,6 +130,32 @@ export function parseInvite(raw: unknown): OrgInvite {
       throw new Error(`invite ${key} must be a string when present`);
     }
   }
+  if (r.default_db !== undefined && typeof r.default_db !== "string") {
+    throw new Error("invite default_db must be a string when present");
+  }
+  let databases: OrgInviteDatabase[] | undefined;
+  if (r.databases !== undefined) {
+    if (!Array.isArray(r.databases)) {
+      throw new Error("invite databases must be an array when present");
+    }
+    databases = r.databases.map((rawDb, index) => {
+      if (typeof rawDb !== "object" || rawDb === null || Array.isArray(rawDb)) {
+        throw new Error(`invite databases[${index}] must be an object`);
+      }
+      const db = rawDb as Record<string, unknown>;
+      for (const key of ["db_slug", "name", "description", "created_by"] as const) {
+        if (typeof db[key] !== "string") {
+          throw new Error(`invite databases[${index}] missing string field: ${key}`);
+        }
+      }
+      return {
+        db_slug: assertSlug(db.db_slug as string, "db slug"),
+        name: db.name as string,
+        description: db.description as string,
+        created_by: db.created_by as string,
+      };
+    });
+  }
   const invite: OrgInvite = {
     version: INVITE_VERSION,
     slug,
@@ -123,6 +165,10 @@ export function parseInvite(raw: unknown): OrgInvite {
     e2e_key: r.e2e_key as string,
     created_by: r.created_by as string,
     issued_at: r.issued_at as string,
+    ...(typeof r.default_db === "string" && r.default_db.length > 0
+      ? { default_db: assertSlug(r.default_db, "default db slug") }
+      : {}),
+    ...(databases ? { databases } : {}),
   };
   if (typeof r.expires_at === "string" && r.expires_at.length > 0) {
     invite.expires_at = r.expires_at;
@@ -422,4 +468,3 @@ You are not in the registry until they do.
 - You never printed raw invite JSON or ran \`lastsecrets get\` on org keys
 `;
 }
-
