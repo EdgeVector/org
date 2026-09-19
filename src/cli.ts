@@ -1630,7 +1630,10 @@ async function cmdDb(
       throw new Error("usage: org db create <org-slug> <db-slug> [--name N] [--description D]");
     }
     const opts = parseOptions(more);
-    const { client, config } = await loadSession(opts, deps);
+    // OrgDatabase is registry metadata. Keep it in the personal registry even
+    // when the caller currently works inside a named org DB. The named locator
+    // belongs to the cloud-sync registration below, not to this metadata write.
+    const { client, config } = await loadSession(opts, deps, formatDbLocator(personalDb()));
     const org = await getOrganization(client, config, orgSlug);
     const name = opts.name ?? dbSlug;
     const description = opts.description ?? "";
@@ -1659,6 +1662,9 @@ async function cmdDb(
     io.stdout.write(`created shared db ${formatDb(db)}\n`);
     io.stdout.write(
       `cohabits this LastDB node under org_hash=${org.orgHash}; key material is lastsecrets only\n`,
+    );
+    io.stdout.write(
+      "registry: org metadata stays in lastdb://personal; use org db share-schema or declare-in-DB for app-schema membership\n",
     );
     const secrets = deps.lastSecrets ?? newLastSecretsCli();
     const locator = formatDbLocator(orgDb(org.slug, dbSlug));
@@ -1712,7 +1718,7 @@ async function cmdDb(
   if (sub === "list") {
     const [orgSlug, ...more] = rest;
     const opts = parseOptions(more);
-    const { client, config } = await loadSession(opts, deps);
+    const { client, config } = await loadSession(opts, deps, formatDbLocator(personalDb()));
     const dbs = await listOrgDatabases(client, config, orgSlug);
     if (dbs.length === 0) {
       io.stdout.write("(no shared databases)\n");
@@ -1730,7 +1736,7 @@ async function cmdDb(
       throw new Error("usage: org db show <org-slug> <db-slug>");
     }
     const opts = parseOptions(more);
-    const { client, config } = await loadSession(opts, deps);
+    const { client, config } = await loadSession(opts, deps, formatDbLocator(personalDb()));
     const db = await getOrgDatabase(client, config, orgSlug, dbSlug);
     io.stdout.write(`${formatDb(db)}\n`);
     return 0;
@@ -1753,7 +1759,7 @@ async function cmdBind(
   if (!opts.root) {
     throw new Error("bind requires --root PATH");
   }
-  const { client, config } = await loadSession(opts, deps);
+  const { client, config } = await loadSession(opts, deps, formatDbLocator(personalDb()));
   if (!config.schemas.PathBinding) {
     throw new Error("PathBinding schema not initialized. Re-run `org init`.");
   }
@@ -1918,13 +1924,14 @@ async function resolveHandle(
 async function loadSession(
   opts: Options,
   deps: CliDeps,
+  dbLocator?: string,
 ): Promise<{ client: ReturnType<typeof newLastDbClient>; config: Config }> {
   const configPath = opts.config ?? defaultConfigPath();
   const config = readConfig(configPath);
   const nodeUrl = opts.nodeUrl ?? config.nodeUrl;
   const socketPath = resolveSocketPath(opts.socketPath ?? config.nodeSocketPath);
   const newClient = deps.newClient ?? newLastDbClient;
-  const client = newClient({ nodeUrl, socketPath, userHash: config.userHash });
+  const client = newClient({ nodeUrl, socketPath, userHash: config.userHash, dbLocator });
   return { client, config };
 }
 
@@ -2204,7 +2211,9 @@ Env: ${LASTDB_DB_ENV} is set when wrapping apps (and --db is injected).
 function dbUsage(): string {
   return `org db subcommands:
   org db create <org-slug> <db-slug> [--name N] [--description D]
+    # writes org metadata to lastdb://personal and arms sync for the named DB
   org db share-schema <org-slug> <db-slug> <schema> [--source lastdb://personal]
+    # adds app-schema membership to the named DB catalog
   org db list [org-slug]
   org db show <org-slug> <db-slug>
 `;

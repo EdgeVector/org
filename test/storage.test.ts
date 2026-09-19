@@ -120,6 +120,26 @@ describe("org storage", () => {
     expect(stored?.fields.default_db).toBeUndefined();
   });
 
+  it("explains the personal registry when a named catalog rejects OrgDatabase", async () => {
+    const client = memoryClient();
+    client.queryByKey = async () => {
+      throw new Error("catalog_membership_denied: org/OrgDatabase");
+    };
+
+    await expect(
+      putOrgDatabase(client, config, {
+        orgSlug: "edgevector",
+        dbSlug: "company",
+        name: "Company",
+        description: "shared",
+        orgHash: "abc123",
+        createdBy: "u1",
+      }),
+    ).rejects.toThrow(
+      "use the personal registry (lastdb://personal) for org db create, or use org db share-schema / declare-in-DB",
+    );
+  });
+
   it("builds a metadata-only admin slice for delivery", async () => {
     const client = memoryClient();
     await putOrganization(client, config, {

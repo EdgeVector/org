@@ -48,6 +48,14 @@ function hasSchemaBinding(config: Config, kind: SchemaKind): boolean {
   }
 }
 
+function registryMembershipError(err: unknown): Error | null {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!/catalog_membership_denied/i.test(message)) return null;
+  return new Error(
+    "org/OrgDatabase is registry metadata and cannot be mutated through a named DB; use the personal registry (lastdb://personal) for org db create, or use org db share-schema / declare-in-DB for app-schema membership.",
+  );
+}
+
 export type Organization = {
   slug: string;
   name: string;
@@ -321,42 +329,46 @@ export async function putOrgDatabase(
     createdBy: string;
   },
 ): Promise<OrgDatabase> {
-  const id = dbId(input.orgSlug, input.dbSlug);
-  const sid = schemaId(config, "OrgDatabase");
-  const existing = await client.queryByKey({
-    schemaHash: sid,
-    keyHash: id,
-    fields: DB_FIELDS,
-  });
-  const now = new Date().toISOString();
-  const createdAt = existing ? rowToDb(existing).createdAt : now;
-  const record: OrgDatabase = {
-    dbId: id,
-    orgSlug: input.orgSlug,
-    dbSlug: input.dbSlug,
-    name: input.name,
-    description: input.description,
-    orgHash: input.orgHash,
-    createdBy: input.createdBy,
-    createdAt,
-    updatedAt: now,
-  };
-  const fields = dbToFields(record);
-  if (existing) {
-    await client.updateRecord({
+  try {
+    const id = dbId(input.orgSlug, input.dbSlug);
+    const sid = schemaId(config, "OrgDatabase");
+    const existing = await client.queryByKey({
       schemaHash: sid,
       keyHash: id,
-      fields,
+      fields: DB_FIELDS,
     });
-  } else {
-    await client.createRecord({
-      schemaHash: sid,
-      keyHash: id,
-      fields,
-    });
+    const now = new Date().toISOString();
+    const createdAt = existing ? rowToDb(existing).createdAt : now;
+    const record: OrgDatabase = {
+      dbId: id,
+      orgSlug: input.orgSlug,
+      dbSlug: input.dbSlug,
+      name: input.name,
+      description: input.description,
+      orgHash: input.orgHash,
+      createdBy: input.createdBy,
+      createdAt,
+      updatedAt: now,
+    };
+    const fields = dbToFields(record);
+    if (existing) {
+      await client.updateRecord({
+        schemaHash: sid,
+        keyHash: id,
+        fields,
+      });
+    } else {
+      await client.createRecord({
+        schemaHash: sid,
+        keyHash: id,
+        fields,
+      });
+    }
+    await addToOrgDbIndex(client, config, input.orgSlug, input.dbSlug);
+    return record;
+  } catch (err) {
+    throw registryMembershipError(err) ?? err;
   }
-  await addToOrgDbIndex(client, config, input.orgSlug, input.dbSlug);
-  return record;
 }
 
 export async function listOrgDatabases(

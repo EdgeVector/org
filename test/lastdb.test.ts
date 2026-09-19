@@ -154,6 +154,7 @@ describe("LastDB client headers", () => {
       const client = newLastDbClient({
         socketPath,
         userHash: "user-1",
+        dbLocator: "lastdb://personal",
       });
 
       await client.queryAll({
@@ -164,6 +165,7 @@ describe("LastDB client headers", () => {
 
       expect(capturedHeaders["x-lastdb-client"]).toBe("org");
       expect(capturedHeaders["x-user-hash"]).toBe("user-1");
+      expect(capturedHeaders["x-lastdb-db"]).toBe("lastdb://personal");
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

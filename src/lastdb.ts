@@ -156,6 +156,8 @@ export function newLastDbClient(opts: {
   nodeUrl?: string;
   userHash?: string;
   socketPath?: string;
+  /** Optional DB locator sent on data-path requests. */
+  dbLocator?: string;
   fetchImpl?: FetchLike;
 } = {}): LastDbClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
@@ -163,6 +165,7 @@ export function newLastDbClient(opts: {
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
   const defaultHeaders: Record<string, string> = { [LASTDB_CLIENT_HEADER]: OWNER_APP_ID };
   if (opts.userHash) defaultHeaders["X-User-Hash"] = opts.userHash;
+  if (opts.dbLocator) defaultHeaders["X-LastDB-Db"] = opts.dbLocator;
   const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
     : httpTransport(nodeUrl, defaultHeaders);
