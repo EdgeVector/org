@@ -47,6 +47,8 @@ export type OrgInvite = {
   default_db?: string;
   /** Named databases that existed when the inviter issued the invite. */
   databases?: OrgInviteDatabase[];
+  /** Shared schema identities that the friend must load before querying restored data. */
+  schema_names?: string[];
   /** Folder mappings that existed for this organization when issued. */
   path_bindings?: OrgInvitePathBinding[];
   /** RFC 3339 expiry; join and accept both reject after this instant. */
@@ -68,6 +70,7 @@ export function buildInvite(input: {
   createdBy: string;
   defaultDb?: string;
   databases?: OrgInviteDatabase[];
+  schemaNames?: string[];
   pathBindings?: OrgInvitePathBinding[];
   /** Milliseconds until expiry; defaults to DEFAULT_INVITE_TTL_MS. */
   ttlMs?: number;
@@ -93,6 +96,9 @@ export function buildInvite(input: {
     issued_at: now.toISOString(),
     ...(input.defaultDb ? { default_db: assertSlug(input.defaultDb, "default db slug") } : {}),
     ...(input.databases ? { databases: input.databases.map((db) => ({ ...db })) } : {}),
+    ...(input.schemaNames && input.schemaNames.length > 0
+      ? { schema_names: [...new Set(input.schemaNames.map((name) => name.trim()).filter(Boolean))] }
+      : {}),
     ...(input.pathBindings
       ? { path_bindings: input.pathBindings.map((binding) => ({ ...binding })) }
       : {}),
@@ -168,6 +174,18 @@ export function parseInvite(raw: unknown): OrgInvite {
       };
     });
   }
+  let schemaNames: string[] | undefined;
+  if (r.schema_names !== undefined) {
+    if (!Array.isArray(r.schema_names)) {
+      throw new Error("invite schema_names must be an array when present");
+    }
+    schemaNames = r.schema_names.map((name, index) => {
+      if (typeof name !== "string" || name.trim().length === 0) {
+        throw new Error(`invite schema_names[${index}] must be a non-empty string`);
+      }
+      return name.trim();
+    });
+  }
   let pathBindings: OrgInvitePathBinding[] | undefined;
   if (r.path_bindings !== undefined) {
     if (!Array.isArray(r.path_bindings)) {
@@ -207,6 +225,7 @@ export function parseInvite(raw: unknown): OrgInvite {
       ? { default_db: assertSlug(r.default_db, "default db slug") }
       : {}),
     ...(databases ? { databases } : {}),
+    ...(schemaNames ? { schema_names: [...new Set(schemaNames)] } : {}),
     ...(pathBindings ? { path_bindings: pathBindings } : {}),
   };
   if (typeof r.expires_at === "string" && r.expires_at.length > 0) {

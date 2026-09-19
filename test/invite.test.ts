@@ -13,13 +13,32 @@ describe("org invite", () => {
       orgPublicKey: keys.orgPublicKey,
       e2eKey: keys.e2eKey,
       createdBy: "user-hash-1",
+      schemaNames: ["ns2probe/Ns2Marker", "ns2probe/Ns2Marker"],
       pathBindings: [{ root: "/tmp/project", db_slug: "company" }],
     });
     const parsed = parseInvite(JSON.parse(serializeInvite(invite)));
     expect(parsed.slug).toBe("edgevector");
     expect(parsed.org_hash).toBe(keys.orgHash);
     expect(parsed.e2e_key).toBe(keys.e2eKey);
+    expect(parsed.schema_names).toEqual(["ns2probe/Ns2Marker"]);
     expect(parsed.path_bindings).toEqual([{ root: "/tmp/project", db_slug: "company" }]);
+  });
+
+  it("rejects an empty shared schema identity", () => {
+    const keys = generateOrgKeys();
+    expect(() =>
+      parseInvite({
+        ...buildInvite({
+          slug: "edgevector",
+          name: "Edge Vector",
+          orgHash: keys.orgHash,
+          orgPublicKey: keys.orgPublicKey,
+          e2eKey: keys.e2eKey,
+          createdBy: "user-hash-1",
+        }),
+        schema_names: [""],
+      }),
+    ).toThrow(/schema_names\[0\]/);
   });
 
   it("rejects tampered org_hash", () => {
