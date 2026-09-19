@@ -16,6 +16,12 @@ export type OrgInviteDatabase = {
   created_by: string;
 };
 
+/** Non-secret folder mapping carried in a join invite. */
+export type OrgInvitePathBinding = {
+  root: string;
+  db_slug: string;
+};
+
 /**
  * One-time join bundle. Contains the raw e2e_key so a peer can join without
  * sharing LastSecrets. After join, the key is stored via lastsecrets put and
@@ -41,6 +47,8 @@ export type OrgInvite = {
   default_db?: string;
   /** Named databases that existed when the inviter issued the invite. */
   databases?: OrgInviteDatabase[];
+  /** Folder mappings that existed for this organization when issued. */
+  path_bindings?: OrgInvitePathBinding[];
   /** RFC 3339 expiry; join and accept both reject after this instant. */
   expires_at?: string;
   /** One-time claim nonce (hex); consumed by the owner at accept. */
@@ -60,6 +68,7 @@ export function buildInvite(input: {
   createdBy: string;
   defaultDb?: string;
   databases?: OrgInviteDatabase[];
+  pathBindings?: OrgInvitePathBinding[];
   /** Milliseconds until expiry; defaults to DEFAULT_INVITE_TTL_MS. */
   ttlMs?: number;
   now?: Date;
@@ -84,6 +93,9 @@ export function buildInvite(input: {
     issued_at: now.toISOString(),
     ...(input.defaultDb ? { default_db: assertSlug(input.defaultDb, "default db slug") } : {}),
     ...(input.databases ? { databases: input.databases.map((db) => ({ ...db })) } : {}),
+    ...(input.pathBindings
+      ? { path_bindings: input.pathBindings.map((binding) => ({ ...binding })) }
+      : {}),
     expires_at: new Date(now.getTime() + ttlMs).toISOString(),
     claim_nonce: newInviteClaimNonce(),
   };
@@ -156,6 +168,32 @@ export function parseInvite(raw: unknown): OrgInvite {
       };
     });
   }
+  let pathBindings: OrgInvitePathBinding[] | undefined;
+  if (r.path_bindings !== undefined) {
+    if (!Array.isArray(r.path_bindings)) {
+      throw new Error("invite path_bindings must be an array when present");
+    }
+    pathBindings = r.path_bindings.map((rawBinding, index) => {
+      if (
+        typeof rawBinding !== "object" ||
+        rawBinding === null ||
+        Array.isArray(rawBinding)
+      ) {
+        throw new Error(`invite path_bindings[${index}] must be an object`);
+      }
+      const binding = rawBinding as Record<string, unknown>;
+      if (typeof binding.root !== "string" || binding.root.length === 0) {
+        throw new Error(`invite path_bindings[${index}] missing string field: root`);
+      }
+      if (typeof binding.db_slug !== "string") {
+        throw new Error(`invite path_bindings[${index}] missing string field: db_slug`);
+      }
+      return {
+        root: binding.root,
+        db_slug: assertSlug(binding.db_slug, "db slug"),
+      };
+    });
+  }
   const invite: OrgInvite = {
     version: INVITE_VERSION,
     slug,
@@ -169,6 +207,7 @@ export function parseInvite(raw: unknown): OrgInvite {
       ? { default_db: assertSlug(r.default_db, "default db slug") }
       : {}),
     ...(databases ? { databases } : {}),
+    ...(pathBindings ? { path_bindings: pathBindings } : {}),
   };
   if (typeof r.expires_at === "string" && r.expires_at.length > 0) {
     invite.expires_at = r.expires_at;

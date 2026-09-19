@@ -13,11 +13,13 @@ describe("org invite", () => {
       orgPublicKey: keys.orgPublicKey,
       e2eKey: keys.e2eKey,
       createdBy: "user-hash-1",
+      pathBindings: [{ root: "/tmp/project", db_slug: "company" }],
     });
     const parsed = parseInvite(JSON.parse(serializeInvite(invite)));
     expect(parsed.slug).toBe("edgevector");
     expect(parsed.org_hash).toBe(keys.orgHash);
     expect(parsed.e2e_key).toBe(keys.e2eKey);
+    expect(parsed.path_bindings).toEqual([{ root: "/tmp/project", db_slug: "company" }]);
   });
 
   it("rejects tampered org_hash", () => {
