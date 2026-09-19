@@ -178,9 +178,13 @@ describe("org CLI", () => {
     const invitePath = join(dir, "invite.json");
     const client = memoryClient("owner-1");
     const secrets = memorySecrets();
+    let lastDbLocator: string | undefined;
     const deps: CliDeps = {
       lastSecrets: secrets,
-      newClient: () => client,
+      newClient: (options) => {
+        lastDbLocator = options?.dbLocator;
+        return client;
+      },
     };
 
     try {
@@ -230,6 +234,8 @@ describe("org CLI", () => {
       );
       expect(code).toBe(0);
       expect(io.out()).toContain("edgevector/company");
+      expect(lastDbLocator).toBe("lastdb://personal");
+      expect(io.out()).toContain("use org db share-schema or declare-in-DB");
 
       const bindRoot = join(dir, "shared-project");
       io = captureIo();

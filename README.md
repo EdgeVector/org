@@ -98,6 +98,11 @@ org list
 org show friends
 ```
 
+`org db create` writes the organization and named-DB records to the personal
+registry (`lastdb://personal`) and arms cloud sync for the named locator. It
+does not add `org/OrgDatabase` to the named DB catalog. Use `org db share-schema`
+or the app's `declare-in-DB` flow to add app-schema membership.
+
 ---
 
 ## Invite someone (preferred: public-key seal)
@@ -198,7 +203,8 @@ Resolution order: **explicit `--db` → cwd under a bound root (longest prefix)
 | `org join --sealed orgseal1:…` | Join from pubkey-sealed package |
 | `org join --from FILE` | Join from secret invite file |
 | `org join --claim TOKEN` | Legacy portable bearer claim |
-| `org db create/list/show` | Named shared DBs under an org |
+| `org db create/list/show` | Named shared DB metadata in the personal registry |
+| `org db share-schema` | Add an app schema to a named DB catalog |
 | `org bind <org> <db> --root PATH` | Map a filesystem root → that DB |
 | `org resolve` / `use` / `unuse` / `current` | Write-target resolution |
 | `org kanban …` / `org run <app> …` | Resolve DB, then run the app |
