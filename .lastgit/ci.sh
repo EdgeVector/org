@@ -30,7 +30,10 @@ if [ -d test ]; then
 fi
 
 # 5. venue pin
-test "$(head -n 1 .last-stack/pr-venue)" = "forgejo"
+case "$(head -n 1 .last-stack/pr-venue)" in
+  forgejo|lastgit) : ;;
+  *) echo "unrecognized pr-venue: $(head -n 1 .last-stack/pr-venue)" >&2; exit 1 ;;
+esac
 
 # 6. mirror policy
 if [ -d .github/workflows ]; then
