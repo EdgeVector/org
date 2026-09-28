@@ -339,6 +339,21 @@ describe("org CLI", () => {
       );
       expect(code).toBe(0);
       expect(io.out().trim()).toBe("lastdb://org/edgevector/company");
+
+      io = captureIo();
+      code = await run(
+        [
+          "resolve",
+          "--db",
+          "lastdb://org/edgevector/company",
+          "--config",
+          configPath,
+        ],
+        io,
+        memberDeps,
+      );
+      expect(code).toBe(0);
+      expect(io.out().trim()).toBe("lastdb://org/edgevector/company");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

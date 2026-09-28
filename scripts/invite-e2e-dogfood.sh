@@ -155,14 +155,17 @@ export LASTDB_HOME="$FRIEND_HOME/.lastdb"
 org_cmd join --sealed "$SEALED" --socket "$SOCK_F" \
   >"$ROOT/join.out" 2>"$ROOT/join.err" || fail "org join"
 grep -q "HTTP 400" "$ROOT/join.err" && fail "join printed HTTP 400" || ok "join has no HTTP 400"
+grep -q "reconstructed named databases=1" "$ROOT/join.out" \
+  && ok "friend reconstructed named db metadata" \
+  || fail "friend did not reconstruct named db metadata"
 cat "$ROOT/join.out"
-org_cmd db create friends shared --name "Shared DB" --socket "$SOCK_F" \
-  >"$ROOT/friend-db-create.out" 2>"$ROOT/friend-db-create.err" || fail "friend db create"
 org_cmd list --socket "$SOCK_F" | tee "$ROOT/friend-list.txt"
 org_cmd show friends --socket "$SOCK_F" | tee "$ROOT/friend-show.txt"
 
 grep -q 'friends' "$ROOT/friend-list.txt" && ok "friend lists org" || fail "friend list"
 grep -Eq 'member|Friends' "$ROOT/friend-show.txt" && ok "friend show org" || fail "friend show"
+grep -q 'friends/shared' "$ROOT/friend-show.txt" && ok "friend sees reconstructed friends/shared" \
+  || fail "friend named db metadata"
 ls_cmd list --socket "$SOCK_F" | tee "$ROOT/friend-secrets.txt"
 grep -q 'org-friends-e2e' "$ROOT/friend-secrets.txt" && ok "friend lastsecrets metadata" || fail "friend secret"
 
@@ -175,6 +178,26 @@ else
 fi
 
 LOCATOR="lastdb://org/friends/shared"
+org_cmd resolve --db "$LOCATOR" --socket "$SOCK_F" \
+  >"$ROOT/friend-resolve.out" 2>"$ROOT/friend-resolve.err" \
+  || fail "friend resolve named locator"
+grep -qx "$LOCATOR" "$ROOT/friend-resolve.out" \
+  && ok "friend resolves $LOCATOR" \
+  || fail "friend locator resolution ($(cat "$ROOT/friend-resolve.out"))"
+
+# Arm sync from the reconstructed default_db. This is the real named-locator
+# request path and sends X-LastDB-Db: lastdb://org/friends/shared.
+org_cmd sync arm friends --socket "$SOCK_F" \
+  >"$ROOT/friend-sync-arm.out" 2>"$ROOT/friend-sync-arm.err" \
+  || fail "friend sync arm"
+if grep -q "org cloud-sync armed" "$ROOT/friend-sync-arm.out"; then
+  ok "friend sends named locator to cloud-sync"
+elif grep -q "org cloud-sync not armed" "$ROOT/friend-sync-arm.err"; then
+  fail "friend named locator sync arm skipped ($(cat "$ROOT/friend-sync-arm.err"))"
+else
+  fail "friend named locator sync arm (stdout=$(cat "$ROOT/friend-sync-arm.out") stderr=$(cat "$ROOT/friend-sync-arm.err"))"
+fi
+
 PROBE_SCHEMA='{
   "namespace": "dogfoodprobe",
   "schema": {
