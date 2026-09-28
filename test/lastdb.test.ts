@@ -173,4 +173,54 @@ describe("LastDB client headers", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("sends a reconstructed named org locator on SDK data-path calls", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "org-lastdb-named-test-"));
+    const socketPath = join(dir, "folddb.sock");
+    let capturedHeaders: Record<string, string | string[] | undefined> = {};
+    const server = createServer((req, res) => {
+      capturedHeaders = req.headers;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          schema: "org/OrgDatabase",
+          rows: [],
+          row_count: 0,
+          total_count: 0,
+          returned_count: 0,
+          limit: 1000,
+          offset: 0,
+          has_more: false,
+        }),
+      );
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+
+    try {
+      const client = newLastDbClient({
+        socketPath,
+        userHash: "friend-1",
+        dbLocator: "lastdb://org/friends/shared",
+      });
+
+      await client.queryAll({
+        schemaHash: "org/OrgDatabase",
+        fields: ["db_slug"],
+        allowFullScan: true,
+      });
+
+      expect(capturedHeaders["x-lastdb-client"]).toBe("org");
+      expect(capturedHeaders["x-user-hash"]).toBe("friend-1");
+      expect(capturedHeaders["x-lastdb-db"]).toBe("lastdb://org/friends/shared");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

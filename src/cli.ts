@@ -243,7 +243,13 @@ export async function run(
     }
 
     if (command === "resolve") {
-      return await cmdResolve(resolveOpts, parseOptions([arg, ...tail].filter(Boolean) as string[]), io, deps);
+      const opts = parseOptions([arg, ...tail].filter(Boolean) as string[]);
+      return await cmdResolve(
+        { ...resolveOpts, ...(opts.db ? { db: opts.db } : {}) },
+        opts,
+        io,
+        deps,
+      );
     }
 
     if (command === "use" && arg) {
@@ -1939,6 +1945,7 @@ type Options = {
   config?: string;
   nodeUrl?: string;
   socketPath?: string;
+  db?: string;
   source?: string;
   name?: string;
   description?: string;
@@ -2049,6 +2056,9 @@ function parseOptions(args: string[]): Options {
       return v;
     };
     switch (a) {
+      case "--db":
+        opts.db = next();
+        break;
       case "--config":
         opts.config = next();
         break;
