@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Required LastGit status gate for the org app.
+# Merge gate for the org app. Run by .github/workflows/ci-required.yml (GitHub Actions).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob 2>/dev/null || true
@@ -31,14 +31,8 @@ fi
 
 # 5. venue pin
 case "$(head -n 1 .last-stack/pr-venue)" in
-  forgejo|lastgit) : ;;
+  github|forgejo|lastgit) : ;;
   *) echo "unrecognized pr-venue: $(head -n 1 .last-stack/pr-venue)" >&2; exit 1 ;;
 esac
-
-# 6. mirror policy
-if [ -d .github/workflows ]; then
-  echo "GitHub workflows require an explicit LastGit -> GitHub mirror setup" >&2
-  exit 1
-fi
 
 echo "ci-required: ok"

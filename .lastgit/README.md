@@ -1,12 +1,5 @@
-# org Forgejo venue
+# org CI
 
-`org` is canonical at `http://localhost:3300/EdgeVector/org.git` and uses
-Forgejo pull requests as the review surface. `.last-stack/pr-venue` must stay
-`forgejo`, and `.lastgit/ci.sh` is the required `ci-required` gate run by
-Forgejo Actions.
-
-GitHub is a read-only public mirror. Do not open pull requests or push to that
-mirror. The Forgejo checkout is the source of truth.
-
-Keep the Forgejo workflow and the required `Forge CI / ci-required
-(pull_request)` context in sync with the branch protection rules.
+`org` is canonical on GitHub (`EdgeVector/org`) since 2026-09-30. The required
+check is the `ci-required` job in `.github/workflows/ci-required.yml`. It runs
+`.lastgit/ci.sh`. The LastGit and Forgejo copies are frozen and read-only.
