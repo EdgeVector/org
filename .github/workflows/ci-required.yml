@@ -1,0 +1,40 @@
+name: ci-required
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-required-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Merge gate (.lastgit/ci.sh)
+        env:
+          NO_COLOR: "1"
+        run: bash .lastgit/ci.sh
+
+  ci-required:
+    name: ci-required
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every job to succeed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$TEST_RESULT" = "success" || { echo "test: $TEST_RESULT" >&2; exit 1; }
