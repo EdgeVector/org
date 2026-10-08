@@ -103,7 +103,9 @@ import {
   putOrgEpoch,
   putOrganization,
   putOrgDatabase,
+  putOrgDatabases,
   putPathBinding,
+  putPathBindings,
   removePathBinding,
   requireEpochBindings,
   requireInviteClaimBinding,
@@ -822,29 +824,28 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     createdBy: invite.created_by,
   });
 
-  for (const database of invite.databases ?? []) {
-    await putOrgDatabase(client, config, {
+  await putOrgDatabases(
+    client,
+    config,
+    (invite.databases ?? []).map((database) => ({
       orgSlug: org.slug,
       dbSlug: database.db_slug,
       name: database.name,
       description: database.description,
       orgHash: org.orgHash,
       createdBy: database.created_by,
-    });
-  }
-  if (invite.path_bindings && invite.path_bindings.length > 0) {
-    if (!config.schemas.PathBinding) {
-      throw new Error("PathBinding schema not initialized. Re-run `org init`.");
-    }
-    for (const binding of invite.path_bindings) {
-      await putPathBinding(client, config, {
-        root: binding.root,
-        orgSlug: org.slug,
-        dbSlug: binding.db_slug,
-        orgHash: org.orgHash,
-      });
-    }
-  }
+    })),
+  );
+  await putPathBindings(
+    client,
+    config,
+    (invite.path_bindings ?? []).map((binding) => ({
+      root: binding.root,
+      orgSlug: org.slug,
+      dbSlug: binding.db_slug,
+      orgHash: org.orgHash,
+    })),
+  );
 
   const sharedSchemaNames = new Set(invite.schema_names ?? []);
   if (typeof client.sharedSchemaNames === "function") {
