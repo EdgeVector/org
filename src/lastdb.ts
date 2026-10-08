@@ -98,6 +98,17 @@ export type LastDbClient = {
     keyHash: string;
     fields: string[];
   }): Promise<QueryRow | null>;
+  /**
+   * Hydrate many known hash keys in one (or a few chunked) `/api/query`
+   * call(s). Filter is `{ HashKeys: keyHashes }`. Empty input does not hit
+   * the node (an empty HashKeys list is a 400). Chunks at the node page cap
+   * of 1000. Keep `queryByKey` for the one-item get path.
+   */
+  queryByKeys(opts: {
+    schemaHash: string;
+    keyHashes: string[];
+    fields: string[];
+  }): Promise<QueryRow[]>;
   queryAll(opts: { schemaHash: string; fields: string[]; allowFullScan?: boolean }): Promise<QueryRow[]>;
 };
 
@@ -423,6 +434,27 @@ export function newLastDbClient(opts: {
       const rows = result.rows.map(sdkRowToQueryRow);
       return rows.find((row) => row.key.hash === keyHash) ?? null;
     },
+    async queryByKeys({ schemaHash, keyHashes, fields }) {
+      const chunks = chunkHashKeys(keyHashes, QUERY_PAGE_SIZE);
+      if (chunks.length === 0) return [];
+      const wanted = new Set(chunks.flat());
+      const found: QueryRow[] = [];
+      for (const chunk of chunks) {
+        const result = await sdkDataPath((client) =>
+          client.query(schemaHash, {
+            fields,
+            filter: { HashKeys: chunk },
+            limit: QUERY_PAGE_SIZE,
+            offset: 0,
+          }),
+        );
+        for (const row of result.rows.map(sdkRowToQueryRow)) {
+          const hash = row.key.hash;
+          if (hash && wanted.has(hash)) found.push(row);
+        }
+      }
+      return found;
+    },
     async queryAll({ schemaHash, fields, allowFullScan }) {
       const result = await sdkDataPath((client) =>
         client.queryAll(
@@ -437,6 +469,23 @@ export function newLastDbClient(opts: {
       return result.rows.map(sdkRowToQueryRow);
     },
   };
+}
+
+/** Split known hashes into node-page-sized HashKeys batches. Skip blanks and dupes. */
+function chunkHashKeys(keyHashes: string[], pageCap: number): string[][] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const hash of keyHashes) {
+    if (hash.length === 0 || seen.has(hash)) continue;
+    seen.add(hash);
+    unique.push(hash);
+  }
+  if (unique.length === 0) return [];
+  const chunks: string[][] = [];
+  for (let i = 0; i < unique.length; i += pageCap) {
+    chunks.push(unique.slice(i, i + pageCap));
+  }
+  return chunks;
 }
 
 function sdkRowToQueryRow(row: SdkQueryRow): QueryRow {

@@ -88,6 +88,12 @@ function memoryClient(userHash = "user-1"): LastDbClient & {
     async queryByKey({ schemaHash, keyHash }) {
       return store.get(k(schemaHash, keyHash)) ?? null;
     },
+    async queryByKeys({ schemaHash, keyHashes }) {
+      return keyHashes.flatMap((keyHash) => {
+        const row = store.get(k(schemaHash, keyHash));
+        return row ? [row] : [];
+      });
+    },
     async queryAll({ schemaHash }) {
       const prefix = `${schemaHash}::`;
       return [...store.entries()]
