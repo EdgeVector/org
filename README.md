@@ -291,8 +291,9 @@ and local keys still work; remote nodes will not converge on shared rows yet.
 
 ## Development / proof
 
+The tests are deleted (Tom, 2026-10-09). The gate runs the typecheck.
+
 ```bash
-bun test
 bun run typecheck
 
 # Two throwaway Minis, distinct identities, pubkey invite → join

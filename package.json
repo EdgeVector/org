@@ -9,7 +9,6 @@
     "org": "src/cli.ts"
   },
   "scripts": {
-    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

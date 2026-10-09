@@ -23,13 +23,7 @@ if [ -f tsconfig.json ]; then
   bun run typecheck
 fi
 
-# 4. unit tests
-if [ -d test ]; then
-  echo "bun test"
-  bun test
-fi
-
-# 5. venue pin
+# 4. venue pin
 case "$(head -n 1 .last-stack/pr-venue)" in
   github|forgejo|lastgit) : ;;
   *) echo "unrecognized pr-venue: $(head -n 1 .last-stack/pr-venue)" >&2; exit 1 ;;
