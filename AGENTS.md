@@ -18,9 +18,10 @@
 
 ## Local loop
 
+The tests are deleted (Tom, 2026-10-09). The gate runs the typecheck.
+
 ```sh
 bun install
-bun test
 bun run typecheck
 bun link          # exposes `org` on PATH
 org init
