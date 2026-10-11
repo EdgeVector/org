@@ -16,6 +16,7 @@ import {
 } from "@lastdb/app-sdk";
 
 import { OWNER_APP_ID, type SchemaDefinition } from "./schema.ts";
+import { queryKnownKeys } from "./key-batch.ts";
 
 export type QueryRow = {
   fields: Record<string, unknown>;
@@ -98,6 +99,7 @@ export type LastDbClient = {
     keyHash: string;
     fields: string[];
   }): Promise<QueryRow | null>;
+  queryByKeys(opts: { schemaHash: string; keyHashes: string[]; fields: string[] }): Promise<QueryRow[]>;
   queryAll(opts: { schemaHash: string; fields: string[]; allowFullScan?: boolean }): Promise<QueryRow[]>;
 };
 
@@ -423,6 +425,14 @@ export function newLastDbClient(opts: {
       const rows = result.rows.map(sdkRowToQueryRow);
       return rows.find((row) => row.key.hash === keyHash) ?? null;
     },
+    async queryByKeys({ schemaHash, keyHashes, fields }) {
+      return queryKnownKeys(keyHashes, async (batch) => {
+        const result = await sdkDataPath((client) => client.query(schemaHash, {
+          fields, filter: { HashRangeKeys: batch.map((hash) => [hash, ""]) }, limit: batch.length, offset: 0,
+        }));
+        return result.rows.map(sdkRowToQueryRow);
+      });
+    },
     async queryAll({ schemaHash, fields, allowFullScan }) {
       const result = await sdkDataPath((client) =>
         client.queryAll(
@@ -487,10 +497,10 @@ function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
-function isLoopbackNodeUrl(url: string): boolean {
+export function isLoopbackNodeUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1";
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(u.hostname);
   } catch {
     return false;
   }

@@ -203,25 +203,17 @@ embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 | Symptom | Fix |
 |---------|-----|
 | `command not found: org` | `export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"`; re-run install / `bun link` in the org checkout |
-| `App schema not loaded` / missing schema | Re-run `org init` on a current Mini (`brew upgrade lastdb` / Last Stack install) |
+| `App schema not loaded` / missing schema | Use the required safe upgrade for a compatible Mini, then re-run `org init` |
 | `join --sealed` fails after `receive` on another laptop | Sealed packages bind to the **receive** keypair; re-run `org receive` on the join machine and re-invite |
 | `org show` works but friend never sees your writes | Cloud sync not enabled on both nodes — membership alone is local; see Mini cloud sync docs |
 | Health check fails | `brew services start lastdb`; socket `~/.lastdb/data/folddb.sock` |
 
 ---
 
-## Dogfood (developers)
-
-Boots two throwaway Mini homes and proves the preferred public-key path:
-friend `org receive` → admin `org invite --to orgpk1:… --agent` → friend
-`org join --sealed` → `org show`.
+## Non-test checks
 
 ```bash
-# from an org checkout
-LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
-  # or: LS_CLI=~/.host-track/apps/lastsecrets/current/src/cli.ts
-  scripts/invite-e2e-dogfood.sh
-# expect: VERDICT: GREEN
+bun run typecheck
 ```
 
-Never points either home at the primary `~/.lastdb` brain.
+Use the normal product commands on an owned account for product proof. Do not use a fixture harness.

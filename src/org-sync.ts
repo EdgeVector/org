@@ -57,7 +57,7 @@ function defaultSocketPath(): string {
   return join(homedir(), ".lastdb", "data", "folddb.sock");
 }
 
-async function udsJson(
+export async function udsJson(
   method: string,
   path: string,
   body?: unknown,

@@ -4,6 +4,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve as pathResolve } from "node:path";
 
 import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
+import { assertOwnerSocket, authorityCommand, authorityRecovery, currentCloudPrincipal, publishCloudAuthority } from "./cloud-authority.ts";
+import { mintNextEpoch } from "./epoch-mutation.ts";
+import { bindOriginalOwner, changeMemberRole } from "./member-roles.ts";
+import { consumeJoinClaim, grantJoinAcceptPrincipal } from "./member-storage.ts";
 import { generateOrgKeys } from "./crypto.ts";
 import {
   buildEpochPayload,
@@ -99,7 +103,6 @@ import {
   listOrgEpochs,
   listOrganizations,
   listPathBindings,
-  putConsumedInviteClaim,
   putOrgEpoch,
   putOrganization,
   putOrgDatabase,
@@ -137,13 +140,13 @@ export type CliDeps = {
   lastSecrets?: LastSecretsCli;
   inviteTransport?: InviteTransport;
   newClient?: typeof newLastDbClient;
-  /** Override wrapApp for tests. */
+  /** Override the app launcher. */
   wrapApp?: typeof wrapApp;
-  /** Override cwd for resolve (tests). */
+  /** Selected working directory for database resolution. */
   cwd?: string;
-  /** Override Exemem principal grant (tests). */
+  /** Override the normal cloud principal grant transport. */
   grantOrgCloudMember?: typeof grantOrgCloudMember;
-  /** Override Exemem principal revoke (tests). */
+  /** Override the normal cloud principal revoke transport. */
   revokeOrgCloudMember?: typeof revokeOrgCloudMember;
 };
 
@@ -339,6 +342,7 @@ async function cmdCreate(
   assertSlug(slug, "org slug");
   const name = opts.name ?? slug;
   const { client, config } = await loadSession(opts, deps);
+  assertOwnerSocket(config);
   // Fail closed before any key material is minted: the epoch chain IS the
   // member registry, so an org without a signed genesis is not an org.
   requireEpochBindings(config);
@@ -360,6 +364,7 @@ async function cmdCreate(
     throw new Error(`organization already exists: ${slug}`);
   }
 
+  const ownerCloudPrincipal = await currentCloudPrincipal(client);
   const keys = generateOrgKeys();
   const secretSlug = e2eSecretSlug(slug);
   secrets.put({
@@ -403,6 +408,7 @@ async function cmdCreate(
     name: opts.ownerName ?? "owner",
     sign_pk: identity.signing_public_key,
     seal_pk: memberPubkeyLine(identity),
+    cloud_user_hash: ownerCloudPrincipal,
     roles: ["owner"],
     status: "active",
   };
@@ -721,44 +727,6 @@ async function joinerMiniUserHash(
   }
 }
 
-/**
- * Owner grants the joiner's Mini principal on the org head after minting
- * the membership epoch. Grant failure does not undo the epoch — print the
- * hard next step so a later `org member grant` can finish the cloud path.
- */
-async function grantJoinAcceptPrincipal(input: {
-  slug: string;
-  orgHash: string;
-  userHash: string | undefined;
-  socketPath?: string;
-  io: Io;
-  deps: CliDeps;
-}): Promise<void> {
-  const userHash = normalizeMiniUserHash(input.userHash);
-  if (!userHash) {
-    input.io.stderr.write(
-      `note: acceptance carried no Mini user_hash; next: org member grant ${input.slug} <friend Mini user_hash>\n`,
-    );
-    return;
-  }
-  const grant = input.deps.grantOrgCloudMember ?? grantOrgCloudMember;
-  const result = await grant({
-    orgHash: input.orgHash,
-    targetUserHash: userHash,
-    role: "writer",
-    socketPath: input.socketPath,
-  });
-  if (result.ok) {
-    input.io.stdout.write(
-      `granted cloud access org=${input.slug} principal=${result.principal_hash ?? userHash} role=${result.role ?? "writer"}\n`,
-    );
-    return;
-  }
-  input.io.stderr.write(
-    `cloud grant failed: ${result.error ?? "unknown"}; next: org member grant ${input.slug} ${userHash}\n`,
-  );
-}
-
 async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
   const modes = [opts.from, opts.claim, opts.sealed].filter(Boolean);
   if (modes.length === 0) {
@@ -973,12 +941,16 @@ async function cmdMember(
   if (!sub || sub === "help" || sub === "--help") {
     io.stdout.write(
       "org member list <slug> [--json]        # registry from the canonical signed epoch\n" +
+        "org member set-role <slug> <member_id> --role owner|admin|member  # sign and publish\n" +
         "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]  # owner mints epoch N+1 and grants Mini principal\n" +
         "org member grant <slug> <user_hash> [--role writer|reader]\n" +
         "org member revoke <slug> <user_hash>\n" +
         "org member leave <slug>\n",
     );
     return 0;
+  }
+  if (sub === "set-role") {
+    return cmdSetMemberRole(rest, io, deps);
   }
   if (sub === "add") {
     const slug = rest[0];
@@ -1024,34 +996,32 @@ async function cmdMember(
       roles: [addOpts.role ?? "member"],
       status: "active",
     };
-    // Burn the nonce BEFORE minting: a crash between the writes fails loudly
-    // on retry instead of leaving a replayable claim behind.
     const consumedAt = new Date().toISOString();
-    await putConsumedInviteClaim(client, config, {
-      claimNonce: accept.payload.claim_nonce,
-      orgHash: org.orgHash,
-      memberId: member.member_id,
-      epochHash: "",
-      consumedAt,
-    });
     const epoch = await mintNextEpoch({
       client,
       config,
       org,
       io,
       deps,
+      identityPath: addOpts.identityPath,
+      ...(member.cloud_user_hash ? { storageRecovery: { action: "grant", principal: member.cloud_user_hash } as const } : {}),
+      beforeStore: consumeJoinClaim(client, config, { claimNonce: accept.payload.claim_nonce,
+        orgHash: org.orgHash, memberId: member.member_id, epochHash: "", consumedAt }, member.cloud_user_hash),
       apply: (members) => {
         appendNewMember(members, member);
         return { members };
       },
     });
-    await updateConsumedInviteClaim(client, config, {
-      claimNonce: accept.payload.claim_nonce,
-      orgHash: org.orgHash,
-      memberId: member.member_id,
-      epochHash: epoch.epoch_hash,
-      consumedAt,
-    });
+    try {
+      await updateConsumedInviteClaim(client, config, {
+        claimNonce: accept.payload.claim_nonce, orgHash: org.orgHash,
+        memberId: member.member_id, epochHash: epoch.epoch_hash, consumedAt,
+      });
+    } catch {
+      throw new Error(`the claim epoch stamp failed after the signed epoch write; ${authorityRecovery({ client, config, org,
+        identityPath: addOpts.identityPath,
+        ...(member.cloud_user_hash ? { storageRecovery: { action: "grant", principal: member.cloud_user_hash } as const } : {}) })}`);
+    }
     io.stdout.write(
       `added ${member.member_id} name=${JSON.stringify(member.name)} role=${member.roles[0]} — signed ${formatEpochSummary(epoch)}\n`,
     );
@@ -1062,6 +1032,9 @@ async function cmdMember(
       socketPath: addOpts.socketPath ?? config.nodeSocketPath,
       io,
       deps,
+      requireCloudGrant: epoch.cloudPublished,
+      recoveryCommand: authorityCommand({ client, config, org, identityPath: addOpts.identityPath },
+        ["member", "grant", slug, member.cloud_user_hash ?? "<member-account-hash>", "--role", "writer"]),
     });
     return 0;
   }
@@ -1111,6 +1084,7 @@ async function cmdMember(
     }
     const grantOpts = parseOptions(rest.slice(2));
     const { client, config } = await loadSession(grantOpts, deps);
+    assertOwnerSocket(config);
     const org = await getOrganization(client, config, slug);
     const role = grantOpts.role ?? "writer";
     const result = await grantOrgCloudMember({
@@ -1133,6 +1107,7 @@ async function cmdMember(
     }
     const revOpts = parseOptions(rest.slice(2));
     const { client, config } = await loadSession(revOpts, deps);
+    assertOwnerSocket(config);
     const org = await getOrganization(client, config, slug);
     const result = await revokeOrgCloudMember({
       orgHash: org.orgHash,
@@ -1148,6 +1123,7 @@ async function cmdMember(
     if (!slug) throw new Error("usage: org member leave <slug>");
     const leaveOpts = parseOptions(rest.slice(1));
     const { client, config } = await loadSession(leaveOpts, deps);
+    assertOwnerSocket(config);
     const org = await getOrganization(client, config, slug);
     const result = await revokeOrgCloudMember({
       orgHash: org.orgHash,
@@ -1158,6 +1134,19 @@ async function cmdMember(
     return 0;
   }
   throw new Error(`unknown member subcommand: ${sub}`);
+}
+
+async function cmdSetMemberRole(rest: string[], io: Io, deps: CliDeps): Promise<number> {
+  const slug = rest[0], memberId = rest[1];
+  const opts = parseOptions(rest.slice(2));
+  if (!slug || !memberId || !opts.role) throw new Error("usage: org member set-role <slug> <member_id> --role owner|admin|member");
+  const { client, config } = await loadSession(opts, deps);
+  const org = await getOrganization(client, config, slug);
+  const context = { client, config, org, socketPath: opts.socketPath, identityPath: opts.identityPath };
+  const receipt = await changeMemberRole(context, memberId, opts.role,
+    (apply) => mintNextEpoch({ ...context, io, deps, apply }));
+  io.stdout.write(`${JSON.stringify(receipt)}\n`);
+  return 0;
 }
 
 /**
@@ -1184,6 +1173,13 @@ async function cmdEpoch(
   const { client, config } = await loadSession(opts, deps);
   const org = await getOrganization(client, config, slug);
 
+  if (sub === "publish" || sub === "bind-owner") {
+    const context = { client, config, org, socketPath: opts.socketPath, identityPath: opts.identityPath };
+    const receipt = sub === "publish" ? await publishCloudAuthority(context)
+      : await bindOriginalOwner(context, (apply) => mintNextEpoch({ ...context, io, deps, apply, requirePublication: true }));
+    io.stdout.write(`${JSON.stringify(receipt)}\n`);
+    return 0;
+  }
   if (sub === "sign") {
     const epoch = await mintNextEpoch({
       client,
@@ -1191,6 +1187,7 @@ async function cmdEpoch(
       org,
       io,
       deps,
+      identityPath: opts.identityPath,
       apply: (members, tip) => {
         let changed = false;
         if (opts.addMember) {
@@ -1311,55 +1308,6 @@ async function cmdEpoch(
   throw new Error(`unknown epoch subcommand: ${sub}\n${epochUsage()}`);
 }
 
-/**
- * The one epoch-mint path: resolve the verified canonical chain, apply a
- * membership mutation, enforce the active-owner invariant, sign with the org
- * root key, persist. `epoch sign`, `member add --accept`, and `kick` all
- * mint through here — membership never lands any other way.
- */
-async function mintNextEpoch(input: {
-  client: ReturnType<typeof newLastDbClient>;
-  config: Config;
-  org: Organization;
-  io: Io;
-  deps: CliDeps;
-  apply: (
-    members: EpochMember[],
-    tip: OrgEpoch,
-  ) => { members: EpochMember[]; repoAdmins?: Record<string, string[]> };
-}): Promise<OrgEpoch> {
-  const secrets = input.deps.lastSecrets ?? newLastSecretsCli();
-  const orgPrivateKey = secrets.get(`org-${input.org.slug}-private`);
-  const resolved = await loadEpochChain(input.client, input.config, input.org, input.io);
-  if (!resolved.ok || !resolved.tip) {
-    throw new Error(
-      `refusing to sign atop an unverifiable chain: ${resolved.error ?? "no canonical epoch"}`,
-    );
-  }
-  const tip = resolved.tip;
-  const working: EpochMember[] = tip.payload.members.map((m) => ({
-    ...m,
-    roles: m.roles.slice(),
-  }));
-  const applied = input.apply(working, tip);
-  const repoAdmins = applied.repoAdmins ?? tip.payload.repo_admins;
-  if (!applied.members.some((m) => m.status === "active" && m.roles.includes("owner"))) {
-    throw new Error("refusing to sign an epoch with no active owner");
-  }
-  const epoch = signEpochPayload(
-    buildEpochPayload({
-      orgHash: input.org.orgHash,
-      epochNo: tip.payload.epoch_no + 1,
-      prevEpoch: tip.epoch_hash,
-      members: applied.members,
-      ...(repoAdmins !== undefined ? { repoAdmins } : {}),
-    }),
-    orgPrivateKey,
-  );
-  await putOrgEpoch(input.client, input.config, epoch);
-  return epoch;
-}
-
 function appendNewMember(members: EpochMember[], added: EpochMember): void {
   const clash = members.find((m) => m.member_id === added.member_id);
   if (clash) {
@@ -1406,7 +1354,9 @@ async function cmdKick(
   const target = resolved.tip.payload.members.find((member) => member.member_id === memberId);
   if (!target) throw new Error(`member not found in registry: ${memberId}`);
   if (target.status === "revoked") {
-    throw new Error(`member already revoked: ${memberId}`);
+    const context = { client, config, org, identityPath: opts.identityPath,
+      ...(target.cloud_user_hash ? { storageRecovery: { action: "revoke", principal: target.cloud_user_hash } as const } : {}) };
+    throw new Error(`member already revoked: ${memberId}; ${authorityRecovery(context)}`);
   }
   const epoch = await mintNextEpoch({
     client,
@@ -1414,6 +1364,13 @@ async function cmdKick(
     org,
     io,
     deps,
+    identityPath: opts.identityPath,
+    ...(target.cloud_user_hash ? { storageRecovery: { action: "revoke", principal: target.cloud_user_hash } as const } : {}),
+    beforeStore: async (enrolled) => {
+      if (enrolled && !normalizeMiniUserHash(target.cloud_user_hash)) {
+        throw new Error("the enrolled member has no signed Mini account hash; the storage revoke cannot be completed");
+      }
+    },
     apply: (members) => {
       revokeMember(members, memberId);
       return { members };
@@ -1434,9 +1391,9 @@ async function cmdKick(
         `revoked cloud access org=${org.slug} principal=${target.cloud_user_hash}\n`,
       );
     } else {
-      io.stderr.write(
-        `cloud revoke failed: ${result.error ?? "unknown"}; next: org member revoke ${org.slug} ${target.cloud_user_hash}\n`,
-      );
+      const message = `signed registry updated, but storage revoke failed; next: ${authorityCommand({ client, config, org, identityPath: opts.identityPath }, ["member", "revoke", org.slug, target.cloud_user_hash])}`;
+      if (epoch.cloudPublished) throw new Error(message);
+      io.stderr.write(`${message}\n`);
     }
   } else {
     io.stderr.write(
@@ -1554,6 +1511,8 @@ function epochUsage(): string {
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
                         [--repo-admins JSON] [--force]
   org epoch show <slug> [EPOCH_HASH] [--json]
+  org epoch publish <slug> [--identity PATH]   # publish the verified current chain
+  org epoch bind-owner <slug> [--identity PATH] # enroll the unchanged original owner
   org epoch verify <slug> [--json]
   org epoch log <slug>
 `;
@@ -1938,7 +1897,7 @@ async function loadSession(
   const socketPath = resolveSocketPath(opts.socketPath ?? config.nodeSocketPath);
   const newClient = deps.newClient ?? newLastDbClient;
   const client = newClient({ nodeUrl, socketPath, userHash: config.userHash, dbLocator });
-  return { client, config };
+  return { client, config: { ...config, nodeUrl, nodeSocketPath: socketPath } };
 }
 
 type Options = {
@@ -1986,7 +1945,7 @@ type Options = {
   accept?: string;
 };
 
-/** Parse 30s / 15m / 72h / 14d (ms allowed for tests) into milliseconds. */
+/** Parse 30s / 15m / 72h / 14d, or milliseconds, into milliseconds. */
 function parseDurationMs(spec: string): number {
   const m = /^(\d+)(ms|s|m|h|d)$/.exec(spec.trim());
   if (!m) {
@@ -2203,6 +2162,7 @@ Other:
   org kick <slug> <member_id>                  # revoke registry + cloud principal; keep shared E2E key
   org sync status | arm <slug> [db-slug]       # cloud-sync targets (armed on org db create)
   org member list <slug> [--json]              # registry from the canonical signed epoch chain
+  org member set-role <slug> <member_id> --role owner|admin|member  # sign and publish
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
   org epoch show|verify|log <slug>             # owner-signed membership epochs (see org epoch help)
   org member grant <slug> <user_hash> [--role writer|reader]
