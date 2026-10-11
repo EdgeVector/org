@@ -35,6 +35,12 @@ GitHub is the source and review host. Use `gh` for PRs. The old Forgejo copy is 
 
 Needs **macOS Apple Silicon**, [Homebrew](https://brew.sh), and [Bun](https://bun.sh).
 
+CAUTION: Use the required Mini safe upgrade before you install this Org version.
+
+This version requires `/api/org/authority/status` and `/api/org/authority/publish` on the selected owner socket. A missing route refuses a signed member change.
+
+It does not treat a missing route as local-only cloud state. See [the authority and release requirements](docs/CLOUD-AUTHORITY.md).
+
 ### Option A — whole app stack (recommended)
 
 Installs LastDB + brain, kanban, situations, **org**, lastsecrets, …
@@ -284,8 +290,8 @@ and local keys still work; remote nodes will not converge on shared rows yet.
   yourself; nothing secret rides plaintext in the package.
 - Org records store only `lastsecrets://…` locators.
 - Never paste E2E keys or invite JSON into Brain, Kanban, chat, git, or PRs.
-- “Kick” someone = **rotate** the org E2E key and re-invite people you still
-  trust (shared-secret model).
+- `org kick` revokes signed membership and the recorded cloud principal.
+  It keeps the shared org encryption key. A former member can keep prior files.
 
 ---
 
@@ -295,15 +301,11 @@ The tests are deleted (Tom, 2026-10-09). The gate runs the typecheck.
 
 ```bash
 bun run typecheck
-
-# Two throwaway Minis, distinct identities, pubkey invite → join
-# (set LS_CLI to a lastsecrets checkout src/cli.ts)
-LS_CLI=~/lastdb-apps/lastsecrets/src/cli.ts \
-  scripts/invite-e2e-dogfood.sh
-# expect: VERDICT: GREEN
 ```
 
-EdgeVector contributors: ship via Forgejo, not GitHub PRs. See
+Use actual product commands on an owned account for product proof. Do not use a fixture harness.
+
+EdgeVector contributors: use GitHub PRs. See
 `.last-stack/pr-venue` and `.lastgit/ci.sh`.
 
 ---

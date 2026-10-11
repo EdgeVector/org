@@ -1012,13 +1012,16 @@ async function cmdMember(
         return { members };
       },
     });
-    await updateConsumedInviteClaim(client, config, {
-      claimNonce: accept.payload.claim_nonce,
-      orgHash: org.orgHash,
-      memberId: member.member_id,
-      epochHash: epoch.epoch_hash,
-      consumedAt,
-    });
+    try {
+      await updateConsumedInviteClaim(client, config, {
+        claimNonce: accept.payload.claim_nonce, orgHash: org.orgHash,
+        memberId: member.member_id, epochHash: epoch.epoch_hash, consumedAt,
+      });
+    } catch {
+      throw new Error(`the claim epoch stamp failed after the signed epoch write; ${authorityRecovery({ client, config, org,
+        identityPath: addOpts.identityPath,
+        ...(member.cloud_user_hash ? { storageRecovery: { action: "grant", principal: member.cloud_user_hash } as const } : {}) })}`);
+    }
     io.stdout.write(
       `added ${member.member_id} name=${JSON.stringify(member.name)} role=${member.roles[0]} — signed ${formatEpochSummary(epoch)}\n`,
     );

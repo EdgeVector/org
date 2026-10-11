@@ -8,6 +8,18 @@ The Org app sends only the public root and signed epochs to the owner socket. Th
 
 Authority commands use one selected local owner socket. They refuse a remote node URL before a local authority change.
 
+## Release order
+
+CAUTION: Install the compatible Mini before this Org version. Use the required Mini safe upgrade.
+
+The Mini must expose both owner authority routes and the configured Cloud Off grant and revoke routes. A status route `404` refuses a signed change.
+
+The app does not change that refusal to local-only behavior. Local-only behavior requires an explicit unconfigured or authority-absent response from the compatible Mini.
+
+An Org merge runs the GitHub non-test checks. It does not install the app through HostTrack.
+
+The app stack installer selects sources through the signed app registry when the installed Mini supports that path. Keep the compatible Mini and Org release paired.
+
 ## New org
 
 Use a Mini version with both org authority routes. Select the correct node socket and Org config for each command.
