@@ -16,6 +16,8 @@ export type Config = {
   nodeUrl: string;
   userHash: string;
   nodeSocketPath?: string;
+  /** Selected config path for recovery instructions; never written to config. */
+  sourceConfigPath?: string;
   schemas: Partial<Record<SchemaKind, SchemaBinding>> & {
     Organization: SchemaBinding;
     OrgDatabase: SchemaBinding;
@@ -54,12 +56,13 @@ export function readConfig(path = defaultConfigPath()): Config {
       `Config at ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  return assertConfigShape(path, parsed);
+  return { ...assertConfigShape(path, parsed), sourceConfigPath: path };
 }
 
 export function writeConfig(config: Config, path = defaultConfigPath()): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", {
+  const { sourceConfigPath: _sourceConfigPath, ...stored } = config;
+  writeFileSync(path, JSON.stringify(stored, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });

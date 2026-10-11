@@ -134,7 +134,7 @@ function arrayStringField(fields: Record<string, unknown>, key: string): string[
 
 /** Read-modify-write append into the single-row OrgIndex (Mini has no atomic array push). */
 async function addToOrgIndex(client: LastDbClient, config: Config, slug: string): Promise<void> {
-  if (!hasSchemaBinding(config, "OrgIndex")) return; // pre-upgrade config / unit tests
+  if (!hasSchemaBinding(config, "OrgIndex")) return; // pre-upgrade config
   const sid = schemaId(config, "OrgIndex");
   const existing = await client.queryByKey({
     schemaHash: sid,
@@ -304,7 +304,7 @@ export async function listOrganizations(
   const sid = schemaId(config, "Organization");
   const slugs = await readOrgSlugsFromIndex(client, config);
   if (slugs === null) {
-    // Pre-index configs / unit tests: explicit admin full scan of the tiny org set.
+    // Pre-index configs: explicit admin full scan of the tiny org set.
     const rows = await client.queryAll({ schemaHash: sid, fields: ORG_FIELDS, allowFullScan: true });
     return rows.map(rowToOrg).sort((a, b) => a.slug.localeCompare(b.slug));
   }
@@ -644,12 +644,9 @@ export async function listOrgEpochs(
   });
   const hashes = indexRow ? arrayStringField(indexRow.fields, "epoch_hashes") : [];
   const sid = schemaId(config, "OrgEpoch");
-  const rows = await Promise.all(
-    hashes.map(async (hash) => ({
-      hash,
-      row: await client.queryByKey({ schemaHash: sid, keyHash: hash, fields: EPOCH_FIELDS }),
-    })),
-  );
+  const fetched = await client.queryByKeys({ schemaHash: sid, keyHashes: hashes, fields: EPOCH_FIELDS });
+  const byHash = new Map(fetched.map((row) => [row.key.hash, row]));
+  const rows = hashes.map((hash) => ({ hash, row: byHash.get(hash) ?? null }));
   const epochs: OrgEpoch[] = [];
   const malformed: OrgEpochListing["malformed"] = [];
   for (const { hash, row } of rows) {

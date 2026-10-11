@@ -23,11 +23,11 @@ only as `lastsecrets://org-<slug>-e2e`.
 | | |
 |--|--|
 | **Public source / clone** | https://github.com/EdgeVector/org |
-| **Canonical review (contributors)** | Forgejo `http://localhost:3300/EdgeVector/org.git` |
+| **Review (contributors)** | GitHub `EdgeVector/org` |
 | **Depends on** | LastDB Mini (`lastdbd`) + [LastSecrets](https://github.com/EdgeVector/lastsecrets) |
 | **Exemem account** | **Not required** for create, invite, or join |
 
-GitHub is a **read-only mirror** (browse/clone). Do not open PRs with `gh` there.
+GitHub is the source and review host. Use `gh` for PRs. The old Forgejo copy is frozen.
 
 ---
 
