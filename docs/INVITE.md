@@ -3,9 +3,7 @@
 **Preferred path:** friend installs LastDB + Org → shows a public key → you seal
 the org key to that key → they join. The sealed package may travel on any clear
 channel (email/Slack/Signal). Friend does **not** need an Exemem account.
-
-Only optional cloud/admin features need an Exemem account later. Invite identity
-is just a **public key** (`orgpk1:…`).
+Invite identity is a **public key** (`orgpk1:…`).
 
 ---
 
@@ -143,17 +141,10 @@ Membership lands **only** as an owner-signed epoch in the org's registry
 chain — there is no mutable member row. Each acceptance is one-time: a
 replayed token is rejected and no epoch is minted.
 
-When the join-accept carries the friend's Mini `user_hash` (from
-`GET /api/status`), `org member add` also grants that principal as writer on
-the org cloud head. No separate `org member grant` is required. If the token
-has no `user_hash`, the command prints
-`next: org member grant friends <friend Mini user_hash>`.
-
 To remove someone from the registry later:
 
 ```bash
-org kick friends <member_id>       # revocation epoch + cloud revoke; no E2E rotation
-org member revoke friends <hash>   # manual fallback when no principal is recorded
+org kick friends <member_id>
 ```
 
 ---
@@ -173,13 +164,6 @@ Never paste invite JSON into email/chat. Delete the file after join.
 
 ---
 
-## Legacy: portable bearer `--claim`
-
-`org invite --to mailto:…` still issues a portable token (AES envelope with
-embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
-
----
-
 ## Security
 
 | On the wire | OK? |
@@ -192,9 +176,6 @@ embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 - Kick someone: **rotate** the org E2E key and re-invite remaining pubkeys
   (shared-secret model — deleting a name does nothing if they still have the key).
 - Names/People mapping is out of band (or a future People app), not required here.
-- Continuous multi-device **data** sync is separate: membership hands out keys;
-  Mini cloud sync (`cloud_sync.json` / `lastdb connect`) is what converges
-  encrypted org logs across machines.
 
 ---
 
@@ -205,7 +186,6 @@ embedded key). Treat that token like a password. Prefer `orgpk1:` sealing.
 | `command not found: org` | `export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"`; re-run install / `bun link` in the org checkout |
 | `App schema not loaded` / missing schema | Use the required safe upgrade for a compatible Mini, then re-run `org init` |
 | `join --sealed` fails after `receive` on another laptop | Sealed packages bind to the **receive** keypair; re-run `org receive` on the join machine and re-invite |
-| `org show` works but friend never sees your writes | Cloud sync not enabled on both nodes — membership alone is local; see Mini cloud sync docs |
 | Health check fails | `brew services start lastdb`; socket `~/.lastdb/data/folddb.sock` |
 
 ---

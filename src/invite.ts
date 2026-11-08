@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import { assertSlug } from "./schema.ts";
 import { orgHashFromPublicKey } from "./crypto.ts";
@@ -27,11 +27,9 @@ export type OrgInvitePathBinding = {
  * sharing LastSecrets. After join, the key is stored via lastsecrets put and
  * only lastsecrets:// refs remain in org records.
  *
- * `expires_at` + `claim_nonce` power the epoch-chain accept flow: the joiner
+ * `expires_at` and `claim_nonce` power the epoch-chain accept flow: the joiner
  * echoes them in its sealed acceptance, and the owner enforces expiry and
- * one-time-claim before minting the membership epoch. Both are optional on
- * the wire so invites from older CLIs still parse (they join locally but
- * cannot mint an epoch).
+ * one-time claim before minting the membership epoch.
  */
 export type OrgInvite = {
   version: typeof INVITE_VERSION;
@@ -52,9 +50,9 @@ export type OrgInvite = {
   /** Folder mappings that existed for this organization when issued. */
   path_bindings?: OrgInvitePathBinding[];
   /** RFC 3339 expiry; join and accept both reject after this instant. */
-  expires_at?: string;
+  expires_at: string;
   /** One-time claim nonce (hex); consumed by the owner at accept. */
-  claim_nonce?: string;
+  claim_nonce: string;
 };
 
 export function newInviteClaimNonce(): string {
@@ -107,11 +105,10 @@ export function buildInvite(input: {
   };
 }
 
-/** True when the invite carries an expiry that has passed. */
+/** True when the invite expiry has passed. Unparseable expiry fails closed. */
 export function inviteExpired(invite: OrgInvite, now = new Date()): boolean {
-  if (!invite.expires_at) return false;
   const expires = Date.parse(invite.expires_at);
-  if (Number.isNaN(expires)) return true; // unparseable expiry fails closed
+  if (Number.isNaN(expires)) return true;
   return now.getTime() > expires;
 }
 
@@ -131,6 +128,8 @@ export function parseInvite(raw: unknown): OrgInvite {
     "e2e_key",
     "created_by",
     "issued_at",
+    "expires_at",
+    "claim_nonce",
   ] as const) {
     if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
       throw new Error(`invite missing field: ${key}`);
@@ -142,11 +141,6 @@ export function parseInvite(raw: unknown): OrgInvite {
     throw new Error(
       `invite org_hash does not match org_public_key (got ${r.org_hash}, expected ${expectedHash})`,
     );
-  }
-  for (const key of ["expires_at", "claim_nonce"] as const) {
-    if (r[key] !== undefined && typeof r[key] !== "string") {
-      throw new Error(`invite ${key} must be a string when present`);
-    }
   }
   if (r.default_db !== undefined && typeof r.default_db !== "string") {
     throw new Error("invite default_db must be a string when present");
@@ -227,68 +221,14 @@ export function parseInvite(raw: unknown): OrgInvite {
     ...(databases ? { databases } : {}),
     ...(schemaNames ? { schema_names: [...new Set(schemaNames)] } : {}),
     ...(pathBindings ? { path_bindings: pathBindings } : {}),
+    expires_at: r.expires_at as string,
+    claim_nonce: r.claim_nonce as string,
   };
-  if (typeof r.expires_at === "string" && r.expires_at.length > 0) {
-    invite.expires_at = r.expires_at;
-  }
-  if (typeof r.claim_nonce === "string" && r.claim_nonce.length > 0) {
-    invite.claim_nonce = r.claim_nonce;
-  }
   return invite;
 }
 
 export function serializeInvite(invite: OrgInvite): string {
   return JSON.stringify(invite, null, 2) + "\n";
-}
-
-export type InviteClaim = {
-  version: 1;
-  claim_id: string;
-  slug: string;
-  org_hash: string;
-  inviter_identity: string;
-  recipient_identity: string;
-  /** Transport label: portable sealed token today; "exemem" reserved for cloud messaging. */
-  transport: "exemem" | "portable";
-  /**
-   * Opaque sealed payload. For the portable transport this is the full
-   * `org-claim-<uuid>.<base64url-envelope>` token for `org join --claim`.
-   */
-  sealed_blob: string;
-  issued_at: string;
-};
-
-export function newInviteClaimId(): string {
-  return `org-claim-${randomUUID()}`;
-}
-
-export function buildInviteClaim(input: {
-  invite: Pick<OrgInvite, "slug" | "org_hash" | "created_by">;
-  claimId: string;
-  recipientIdentity: string;
-  sealedBlob: string;
-}): InviteClaim {
-  assertSlug(input.invite.slug, "org slug");
-  if (!input.claimId.startsWith("org-claim-")) {
-    throw new Error("invite claim id must start with org-claim-");
-  }
-  if (!input.recipientIdentity.trim()) {
-    throw new Error("recipient identity is required");
-  }
-  if (!input.sealedBlob.trim()) {
-    throw new Error("sealed invite blob is required");
-  }
-  return {
-    version: 1,
-    claim_id: input.claimId,
-    slug: input.invite.slug,
-    org_hash: input.invite.org_hash,
-    inviter_identity: input.invite.created_by,
-    recipient_identity: input.recipientIdentity,
-    transport: "portable",
-    sealed_blob: input.sealedBlob,
-    issued_at: new Date().toISOString(),
-  };
 }
 
 export function buildAgentInstructions(input: {
@@ -336,7 +276,7 @@ export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
 lastsecrets init
 org init
 # recommended:
-brain init --grant-consent
+brain init
 kanban init
 \`\`\`
 
@@ -369,82 +309,8 @@ cd ~/path/to/project && org resolve && org kanban list
 `;
 }
 
-export function buildClaimAgentInstructions(input: {
-  invite: Pick<OrgInvite, "slug" | "name">;
-  claim: Pick<InviteClaim, "claim_id" | "recipient_identity" | "sealed_blob">;
-}): string {
-  const slug = input.invite.slug;
-  const name = input.invite.name;
-  const recipient = input.claim.recipient_identity;
-  // Prefer the full portable token (claim_id.envelope) so join works offline.
-  const claimToken = input.claim.sealed_blob.startsWith("org-claim-")
-    ? input.claim.sealed_blob
-    : input.claim.claim_id;
-  return `# LastDB org invite — agent instructions (sealed claim)
-
-You are helping a human join the LastDB organization **${name}** (\`${slug}\`).
-
-These instructions do **not** contain the raw org encryption key. They contain a
-**portable sealed claim token** — treat that token like a one-time password
-(Signal/email to the right person is OK; do not post publicly). Prefer sealed
-claim over a \`.invite.json\` file when the inviter used \`--to\`.
-
-Recipient identity hint: \`${recipient}\`
-
-## 1) Install (macOS Apple Silicon; skip steps already done)
-
-\`\`\`bash
-curl -fsSL https://bun.sh/install | bash
-export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-
-git clone https://github.com/EdgeVector/last-stack ~/.last-stack
-~/.last-stack/setup
-~/.last-stack/bin/last-stack-install-apps
-
-brew services start lastdb
-curl -s --unix-socket ~/.lastdb/data/folddb.sock http://localhost/health
-# expect: {"status":"ok"}
-\`\`\`
-
-## 2) One-time app setup
-
-\`\`\`bash
-export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
-lastsecrets init
-org init
-brain init --grant-consent
-kanban init
-\`\`\`
-
-## 3) Claim the sealed invite
-
-Copy the claim token **exactly** (one line):
-
-\`\`\`
-${claimToken}
-\`\`\`
-
-Then:
-
-\`\`\`bash
-org join --claim '${claimToken}'
-org list
-org show ${slug}
-\`\`\`
-
-If claim fails, ask the inviter to re-send with the secret-file path:
-\`org invite ${slug} --out FILE --agent\`.
-
-## Done when
-
-- \`org show ${slug}\` succeeds
-- You never printed raw invite JSON or e2e keys
-- Prefer deleting this message from shared logs after join
-`;
-}
-
 /**
- * Agent instructions for the preferred clear-channel path: package is
+ * Agent instructions for the clear-channel path: package is
  * encrypted to the friend's `orgpk1:…` public key (from `org receive`).
  * The package may be pasted over email/Slack; raw e2e_key is never present.
  */
@@ -516,7 +382,7 @@ org show ${slug}
 \`org join\` prints a line starting with \`acceptance=orgaccept1:…\`. Send that
 full token back to the org admin over any channel (it contains no secrets).
 The admin runs \`org member add ${slug} --accept '<token>'\` to add you to the
-signed member registry and grant your Mini principal on the org cloud head.
+signed member registry.
 You are not in the registry until they do.
 
 ## Done when

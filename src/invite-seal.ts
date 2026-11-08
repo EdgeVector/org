@@ -1,13 +1,9 @@
 /**
  * Org invite sealing.
  *
- * 1) **Pubkey-bound (preferred):** encrypt the invite to the friend's X25519
- *    public key (`orgpk1:…`), sign with the org Ed25519 private key. Ciphertext
- *    may travel on any clear channel; only the friend can open it.
- *
- * 2) **Portable bearer (legacy):** AES-256-GCM with key embedded in the
- *    envelope. Possession of the token is capability — treat like a password.
- *    Kept for `org join --claim` tokens already issued.
+ * Encrypt the invite to the friend's X25519 public key (`orgpk1:…`) and sign
+ * with the org Ed25519 private key. Ciphertext may travel on any clear
+ * channel; only the friend can open it.
  */
 import {
   createCipheriv,
@@ -32,103 +28,9 @@ import {
   x25519RawPublic,
 } from "./member-identity.ts";
 
-const PORTABLE_VERSION = 1;
 const PUBKEY_SEAL_VERSION = 2;
 const SEAL_PREFIX = "orgseal1:" as const;
 const HKDF_INFO = Buffer.from("org-invite-seal-v2", "utf8");
-
-// --- Portable bearer (legacy) ------------------------------------------------
-
-/** AES-GCM package: version(1) || key(32) || nonce(12) || tag(16) || ciphertext */
-export function sealInvite(invite: OrgInvite): string {
-  const key = randomBytes(32);
-  const nonce = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  const plaintext = Buffer.from(serializeInvite(invite), "utf8");
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const packed = Buffer.concat([
-    Buffer.from([PORTABLE_VERSION]),
-    key,
-    nonce,
-    tag,
-    ciphertext,
-  ]);
-  return packed.toString("base64url");
-}
-
-export function unsealInvite(sealedBlob: string): OrgInvite {
-  let packed: Buffer;
-  try {
-    packed = Buffer.from(sealedBlob, "base64url");
-  } catch {
-    throw new Error("sealed invite blob is not valid base64url");
-  }
-  if (packed.length < 1 + 32 + 12 + 16 + 1) {
-    throw new Error("sealed invite blob is truncated");
-  }
-  const version = packed[0];
-  if (version !== PORTABLE_VERSION) {
-    throw new Error(`unsupported sealed invite version: ${version}`);
-  }
-  const key = packed.subarray(1, 33);
-  const nonce = packed.subarray(33, 45);
-  const tag = packed.subarray(45, 61);
-  const ciphertext = packed.subarray(61);
-  const decipher = createDecipheriv("aes-256-gcm", key, nonce);
-  decipher.setAuthTag(tag);
-  let plaintext: Buffer;
-  try {
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  } catch {
-    throw new Error("failed to unseal invite (wrong/corrupt claim token)");
-  }
-  return parseInvite(JSON.parse(plaintext.toString("utf8")));
-}
-
-/**
- * Portable claim token: `org-claim-<uuid>.<base64url-envelope>`
- * Safe to treat as a single secret string for `org join --claim`.
- */
-export function encodePortableClaim(claimId: string, sealedBlob: string): string {
-  if (!claimId.startsWith("org-claim-")) {
-    throw new Error("invite claim id must start with org-claim-");
-  }
-  if (claimId.includes(".")) {
-    throw new Error("claim id must not contain '.'");
-  }
-  if (!sealedBlob.trim()) {
-    throw new Error("sealed invite blob is required");
-  }
-  return `${claimId}.${sealedBlob}`;
-}
-
-export function decodePortableClaim(token: string): {
-  claimId: string;
-  sealedBlob: string;
-} {
-  const trimmed = token.trim();
-  const dot = trimmed.indexOf(".");
-  if (dot <= 0 || dot === trimmed.length - 1) {
-    if (!trimmed.startsWith("org-claim-")) {
-      throw new Error("claim token must start with org-claim-");
-    }
-    return { claimId: trimmed, sealedBlob: "" };
-  }
-  const claimId = trimmed.slice(0, dot);
-  const sealedBlob = trimmed.slice(dot + 1);
-  if (!claimId.startsWith("org-claim-")) {
-    throw new Error("claim token must start with org-claim-");
-  }
-  return { claimId, sealedBlob };
-}
-
-export function isPortableClaimToken(token: string): boolean {
-  const t = token.trim();
-  return t.startsWith("org-claim-") && t.includes(".");
-}
-
-// --- Pubkey-bound seal (preferred clear-channel path) ------------------------
 
 export type PubkeySealedPackage = {
   v: typeof PUBKEY_SEAL_VERSION;
@@ -251,10 +153,6 @@ export function sealInviteToPubkey(input: {
   return `${SEAL_PREFIX}${Buffer.from(JSON.stringify(full), "utf8").toString("base64url")}`;
 }
 
-export function isPubkeySealedPackage(token: string): boolean {
-  return token.trim().startsWith(SEAL_PREFIX);
-}
-
 export function parsePubkeySealedPackage(token: string): PubkeySealedPackage {
   const trimmed = token.trim();
   if (!trimmed.startsWith(SEAL_PREFIX)) {
@@ -333,28 +231,4 @@ export function unsealInviteWithMemberKey(
     throw new Error("failed to decrypt sealed invite (wrong member key or corrupt package)");
   }
   return parseInvite(JSON.parse(plaintext.toString("utf8")));
-}
-
-/** Unseal either orgseal1:… (needs member key) or legacy portable envelope. */
-export function unsealAnyInvite(
-  token: string,
-  memberPrivateKey?: KeyObject,
-): OrgInvite {
-  const t = token.trim();
-  if (isPubkeySealedPackage(t)) {
-    if (!memberPrivateKey) {
-      throw new Error("pubkey-sealed package requires local member identity (run org receive first)");
-    }
-    return unsealInviteWithMemberKey(t, memberPrivateKey);
-  }
-  // portable envelope alone or claim token with embedded envelope
-  if (isPortableClaimToken(t)) {
-    const { sealedBlob } = decodePortableClaim(t);
-    if (!sealedBlob) {
-      throw new Error("portable claim token missing sealed envelope");
-    }
-    return unsealInvite(sealedBlob);
-  }
-  // bare portable envelope
-  return unsealInvite(t);
 }

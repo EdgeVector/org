@@ -35,7 +35,7 @@ export type EpochMember = {
   sign_pk: string;
   /** orgpk1:… X25519 seal public key (invite recipient key). */
   seal_pk: string;
-  /** Mini cloud principal used for live org access grant and revoke. */
+  /** Optional Mini account hash recorded on the signed member. */
   cloud_user_hash?: string;
   roles: string[];
   status: EpochMemberStatus;
@@ -269,7 +269,7 @@ export function verifyEpochChain(
 }
 
 /**
- * The full canonical-chain resolution lastgit reuses: filter to individually
+ * Resolve the canonical chain: filter to individually
  * verified epochs for this org, pick the canonical tip, walk back to genesis,
  * and verify the chain structure. Invalid records are reported, not silently
  * dropped.
