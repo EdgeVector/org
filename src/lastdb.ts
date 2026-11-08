@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -7,7 +6,6 @@ import {
   TransportError,
   UnexpectedResponseError,
   capabilityStoreKey,
-  httpTransport,
   udsTransport,
   type CapabilityStore,
   type JsonValue,
@@ -21,20 +19,6 @@ import { queryKnownKeys } from "./key-batch.ts";
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
-};
-
-export type DistributionRegisterItem = {
-  app_id: string;
-  schema_name: string;
-  identity_hash: string;
-  status: "registered" | "already_exists" | "error";
-  error?: string;
-};
-
-export type RegisterForDistributionResult = {
-  app_id: string;
-  items: DistributionRegisterItem[];
-  ok: boolean;
 };
 
 export type DistributionReadyItem = {
@@ -53,7 +37,6 @@ export type LoadSchemasResult = {
   availableSchemasLoaded: number;
   schemasLoadedToDb: number;
   failedSchemas: string[];
-  skipped?: string;
 };
 
 export type LastDbClient = {
@@ -67,21 +50,11 @@ export type LastDbClient = {
     appId: string,
     schema: SchemaDefinition,
   ): Promise<{ canonical: string; schemaName: string }>;
-  /**
-   * Promote app schemas to Schema Service so other people can install/depend
-   * on this app. Solo local declare does not require this.
-   */
-  registerForDistribution(
-    appId: string,
-    schemas: SchemaDefinition[],
-  ): Promise<RegisterForDistributionResult>;
   /** Fail closed if any required schema identity is missing on Schema Service. */
   verifyDistributionReady(
     appId: string,
     schemaIdentities: string[],
   ): Promise<VerifyDistributionReadyResult>;
-  /** Return shared schema names recorded by org cloud-sync targets. */
-  sharedSchemaNames?(orgHash: string): Promise<string[]>;
   /** Load only the requested published schemas into this Mini. */
   loadSchemas?(schemaNames: string[]): Promise<LoadSchemasResult>;
   createRecord(opts: {
@@ -120,7 +93,7 @@ type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 
 const QUERY_PAGE_SIZE = 1000;
 const SOCKET_FILE_NAME = "folddb.sock";
-const DEFAULT_NODE_URL = "http://localhost:9001";
+const DEFAULT_NODE_URL = "http://127.0.0.1";
 const LASTDB_CLIENT_HEADER = "X-LastDB-Client";
 const noopCapabilityStore: CapabilityStore = {
   async store() {},
@@ -136,41 +109,26 @@ export function defaultNodeUrl(): string {
 
 export function resolveSocketPath(override?: string): string {
   if (override && override.length > 0) return override;
-  for (const name of [
-    "ORG_SOCKET_PATH",
-    "LASTDB_SOCKET_PATH",
-    "FOLDDB_SOCKET_PATH",
-    "FOLDDB_SOCK",
-    "FBRAIN_FOLDDB_SOCKET",
-  ]) {
+  for (const name of ["ORG_SOCKET_PATH", "LASTDB_SOCKET_PATH", "FOLDDB_SOCKET_PATH"]) {
     const value = process.env[name];
     if (value && value.length > 0) return value;
   }
   const lastdbHome = process.env.LASTDB_HOME ?? join(homedir(), ".lastdb");
-  const folddbHome = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
-  const lastdbSocket = join(lastdbHome, "data", SOCKET_FILE_NAME);
-  const folddbSocket = join(folddbHome, "data", SOCKET_FILE_NAME);
-  if (existsSync(lastdbSocket)) return lastdbSocket;
-  return folddbSocket;
+  return join(lastdbHome, "data", SOCKET_FILE_NAME);
 }
 
 export function newLastDbClient(opts: {
   nodeUrl?: string;
-  userHash?: string;
   socketPath?: string;
   /** Optional DB locator sent on data-path requests. */
   dbLocator?: string;
   fetchImpl?: FetchLike;
 } = {}): LastDbClient {
-  const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
   const defaultHeaders: Record<string, string> = { [LASTDB_CLIENT_HEADER]: OWNER_APP_ID };
-  if (opts.userHash) defaultHeaders["X-User-Hash"] = opts.userHash;
   if (opts.dbLocator) defaultHeaders["X-LastDB-Db"] = opts.dbLocator;
-  const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
-    ? udsTransport(socketPath, defaultHeaders)
-    : httpTransport(nodeUrl, defaultHeaders);
+  const sdkTransport: SdkTransport = udsTransport(socketPath, defaultHeaders);
   const sdkStoreKey = capabilityStoreKey(OWNER_APP_ID, sdkTransport.target);
   let sdkClient: SdkLastDbClient | null = null;
   const dataClient = (): SdkLastDbClient => {
@@ -189,7 +147,7 @@ export function newLastDbClient(opts: {
     try {
       return await fn(dataClient());
     } catch (err) {
-      throw mapSdkError(err, nodeUrl, socketPath);
+      throw mapSdkError(err, socketPath);
     }
   };
 
@@ -201,29 +159,25 @@ export function newLastDbClient(opts: {
     body?: unknown,
   ): Promise<unknown> => {
     const headers: Record<string, string> = { [LASTDB_CLIENT_HEADER]: OWNER_APP_ID };
-    if (opts.userHash) headers["X-User-Hash"] = opts.userHash;
     let requestBody: string | undefined;
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       requestBody = JSON.stringify(body);
     }
 
-    const socket = isLoopbackNodeUrl(nodeUrl) ? socketPath : null;
-    const url = socket ? `http://localhost${path}` : `${nodeUrl}${path}`;
+    const url = `http://localhost${path}`;
     let response: Response;
     try {
       response = await fetchImpl(url, {
         method,
         headers,
         body: requestBody,
-        ...(socket ? { unix: socket } : {}),
+        unix: socketPath,
       });
     } catch (err) {
       throw new OrgError(
         "service_unreachable",
-        socket
-          ? `LastDB is not reachable over its Unix socket ${socket}.`
-          : `LastDB is not reachable at ${nodeUrl}.`,
+        `LastDB is not reachable over its Unix socket ${socketPath}.`,
         err,
       );
     }
@@ -256,37 +210,16 @@ export function newLastDbClient(opts: {
     async nodeUserHash() {
       try {
         const body = await callJson("/api/status", "GET");
-        const fromStatus = userHashFromStatusBody(body);
-        if (fromStatus) return fromStatus;
-      } catch {
-        // Fall through to auto-identity (older Mini, or /api/status missing).
-      }
-      try {
-        const id = await autoIdentityFn();
-        return id.userHash;
+        return userHashFromStatusBody(body);
       } catch {
         return undefined;
       }
     },
     async declareAppSchema(appId, schema) {
-      // Supported app-facing path (sop-register-app-schemas-on-lastdb-node):
-      // Mini POST /api/apps/declare-schema. Fall back to /api/schemas/declare
-      // only when the apps route is missing (older Mini).
-      let body: unknown;
-      try {
-        body = await callJson("/api/apps/declare-schema", "POST", {
-          app_id: appId,
-          schema,
-        });
-      } catch (err) {
-        if (!(err instanceof OrgError) || err.code !== "node_http_404") {
-          throw err;
-        }
-        body = await callJson("/api/schemas/declare", "POST", {
-          namespace: appId,
-          schema,
-        });
-      }
+      const body = await callJson("/api/apps/declare-schema", "POST", {
+        app_id: appId,
+        schema,
+      });
       const canonical = declareCanonical(body);
       const schemaName = declareSchemaName(body, appId, schema.name);
       if (!canonical) {
@@ -309,32 +242,6 @@ export function newLastDbClient(opts: {
       }
       return { canonical, schemaName };
     },
-    async registerForDistribution(appId, schemas) {
-      const body = await callJson("/api/apps/register-for-distribution", "POST", {
-        app_id: appId,
-        schemas,
-      });
-      const data = unwrapData(body);
-      const items = Array.isArray(data.items)
-        ? (data.items as Record<string, unknown>[]).map(parseRegisterItem)
-        : [];
-      const ok =
-        typeof data.ok === "boolean"
-          ? data.ok
-          : items.length > 0 &&
-            items.every((i) => i.status === "registered" || i.status === "already_exists");
-      if (items.length === 0) {
-        throw new OrgError(
-          "distribution_register_bad_response",
-          "LastDB register-for-distribution returned no items.",
-        );
-      }
-      return {
-        app_id: typeof data.app_id === "string" ? data.app_id : appId,
-        items,
-        ok,
-      };
-    },
     async verifyDistributionReady(appId, schemaIdentities) {
       const body = await callJson("/api/apps/verify-distribution-ready", "POST", {
         app_id: appId,
@@ -354,46 +261,18 @@ export function newLastDbClient(opts: {
         ready,
       };
     },
-    async sharedSchemaNames(orgHash) {
-      const body = await callJson("/api/org/sync/targets", "GET");
-      const data = unwrapData(body);
-      if (!Array.isArray(data.targets)) return [];
-      const names = (data.targets as unknown[]).flatMap((raw) => {
-        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
-        const target = raw as Record<string, unknown>;
-        if (target.org_hash !== orgHash) return [];
-        return Array.isArray(target.unprefixed_schema_names)
-          ? target.unprefixed_schema_names.filter(
-              (name): name is string => typeof name === "string" && name.trim().length > 0,
-            )
-          : [];
-      });
-      return [...new Set(names)];
-    },
     async loadSchemas(schemaNames) {
       const requested = [...new Set(schemaNames.map((name) => name.trim()).filter(Boolean))];
       if (requested.length === 0) {
         return { availableSchemasLoaded: 0, schemasLoadedToDb: 0, failedSchemas: [] };
       }
-      try {
-        const body = await callJson("/api/schemas/load", "POST", { schemas: requested });
-        const data = unwrapData(body);
-        return {
-          availableSchemasLoaded: objectNumber(data, "available_schemas_loaded"),
-          schemasLoadedToDb: objectNumber(data, "schemas_loaded_to_db"),
-          failedSchemas: objectStringArray(data, "failed_schemas"),
-        };
-      } catch (err) {
-        if (err instanceof OrgError && err.code === "node_http_404") {
-          return {
-            availableSchemasLoaded: 0,
-            schemasLoadedToDb: 0,
-            failedSchemas: [],
-            skipped: "this node does not serve /api/schemas/load on folddb.sock (format 10 or older)",
-          };
-        }
-        throw err;
-      }
+      const body = await callJson("/api/schemas/load", "POST", { schemas: requested });
+      const data = unwrapData(body);
+      return {
+        availableSchemasLoaded: objectNumber(data, "available_schemas_loaded"),
+        schemasLoadedToDb: objectNumber(data, "schemas_loaded_to_db"),
+        failedSchemas: objectStringArray(data, "failed_schemas"),
+      };
     },
     async createRecord({ schemaHash, fields, keyHash }) {
       await sdkDataPath((client) =>
@@ -460,7 +339,7 @@ function renderedKeyToHashKey(key: string): { hash: string | null; range: string
   return { hash: key.length > 0 ? key : null, range: null };
 }
 
-function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
+function mapSdkError(err: unknown, socketPath: string): Error {
   if (err instanceof TransportError) {
     const detail = err.message ?? String(err);
     // SDK classifies non-JSON error bodies as TransportError; those are still
@@ -477,9 +356,7 @@ function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
     }
     return new OrgError(
       "service_unreachable",
-      isLoopbackNodeUrl(nodeUrl)
-        ? `LastDB is not reachable over its Unix socket ${socketPath}.`
-        : `LastDB is not reachable at ${nodeUrl}.`,
+      `LastDB is not reachable over its Unix socket ${socketPath}.`,
       err,
     );
   }
@@ -491,10 +368,6 @@ function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
     );
   }
   return err instanceof Error ? err : new Error(String(err));
-}
-
-function stripTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
 }
 
 export function isLoopbackNodeUrl(url: string): boolean {
@@ -555,21 +428,6 @@ function unwrapData(body: unknown): Record<string, unknown> {
     return rec.data as Record<string, unknown>;
   }
   return rec;
-}
-
-function parseRegisterItem(raw: Record<string, unknown>): DistributionRegisterItem {
-  const statusRaw = typeof raw.status === "string" ? raw.status : "error";
-  const status =
-    statusRaw === "registered" || statusRaw === "already_exists" || statusRaw === "error"
-      ? statusRaw
-      : "error";
-  return {
-    app_id: typeof raw.app_id === "string" ? raw.app_id : "",
-    schema_name: typeof raw.schema_name === "string" ? raw.schema_name : "",
-    identity_hash: typeof raw.identity_hash === "string" ? raw.identity_hash : "",
-    status,
-    error: typeof raw.error === "string" ? raw.error : undefined,
-  };
 }
 
 function parseReadyItem(raw: Record<string, unknown>): DistributionReadyItem {

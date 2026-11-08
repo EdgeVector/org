@@ -48,14 +48,6 @@ function hasSchemaBinding(config: Config, kind: SchemaKind): boolean {
   }
 }
 
-function registryMembershipError(err: unknown): Error | null {
-  const message = err instanceof Error ? err.message : String(err);
-  if (!/catalog_membership_denied/i.test(message)) return null;
-  return new Error(
-    "org/OrgDatabase is registry metadata and cannot be mutated through a named DB; use the personal registry (lastdb://personal) for org db create, or use org db share-schema / declare-in-DB for app-schema membership.",
-  );
-}
-
 export type Organization = {
   slug: string;
   name: string;
@@ -270,13 +262,11 @@ export async function putOrganization(
     updatedAt: now,
   };
   const fields = orgToFields(record);
-  await writeRecordWithLegacyFallback(client, {
-    schemaHash: sid,
-    keyHash: input.slug,
-    fields,
-    legacyFields: withoutKeys(fields, ["default_db"]),
-    update: Boolean(existing),
-  });
+  if (existing) {
+    await client.updateRecord({ schemaHash: sid, keyHash: input.slug, fields });
+  } else {
+    await client.createRecord({ schemaHash: sid, keyHash: input.slug, fields });
+  }
   await addToOrgIndex(client, config, record.slug);
   return record;
 }
@@ -329,7 +319,6 @@ export async function putOrgDatabase(
     createdBy: string;
   },
 ): Promise<OrgDatabase> {
-  try {
     const id = dbId(input.orgSlug, input.dbSlug);
     const sid = schemaId(config, "OrgDatabase");
     const existing = await client.queryByKey({
@@ -366,9 +355,6 @@ export async function putOrgDatabase(
     }
     await addToOrgDbIndex(client, config, input.orgSlug, input.dbSlug);
     return record;
-  } catch (err) {
-    throw registryMembershipError(err) ?? err;
-  }
 }
 
 export async function listOrgDatabases(
@@ -885,44 +871,6 @@ function rowToDb(row: QueryRow): OrgDatabase {
     createdAt: str(f.created_at),
     updatedAt: str(f.updated_at),
   };
-}
-
-async function writeRecordWithLegacyFallback(
-  client: LastDbClient,
-  opts: {
-    schemaHash: string;
-    keyHash: string;
-    fields: Record<string, unknown>;
-    legacyFields: Record<string, unknown>;
-    update: boolean;
-  },
-): Promise<void> {
-  const write = (fields: Record<string, unknown>) =>
-    opts.update
-      ? client.updateRecord({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, fields })
-      : client.createRecord({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, fields });
-  try {
-    await write(opts.fields);
-  } catch (err) {
-    if (!isUnknownFieldsError(err)) throw err;
-    await write(opts.legacyFields);
-  }
-}
-
-function withoutKeys(
-  fields: Record<string, unknown>,
-  keys: string[],
-): Record<string, unknown> {
-  const copy = { ...fields };
-  for (const key of keys) {
-    delete copy[key];
-  }
-  return copy;
-}
-
-function isUnknownFieldsError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return message.includes("unknown_fields");
 }
 
 function str(value: unknown): string {

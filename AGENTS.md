@@ -62,4 +62,3 @@ org db create edgevector company --name "Company DB"
 - GitHub is the source and review host for `EdgeVector/org`.
 - `.last-stack/pr-venue` is `github`. Use `gh` for product PRs.
 - The required `ci-required` job runs `.lastgit/ci.sh` for the non-test checks.
-- The old Forgejo copy is frozen.

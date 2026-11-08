@@ -4,10 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve as pathResolve } from "node:path";
 
 import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
-import { assertOwnerSocket, authorityCommand, authorityRecovery, currentCloudPrincipal, publishCloudAuthority } from "./cloud-authority.ts";
-import { mintNextEpoch } from "./epoch-mutation.ts";
-import { bindOriginalOwner, changeMemberRole } from "./member-roles.ts";
-import { consumeJoinClaim, grantJoinAcceptPrincipal } from "./member-storage.ts";
+import { assertOwnerSocket, mintNextEpoch } from "./epoch-mutation.ts";
+import { changeMemberRole } from "./member-roles.ts";
+import { consumeJoinClaim } from "./member-storage.ts";
 import { generateOrgKeys } from "./crypto.ts";
 import {
   buildEpochPayload,
@@ -30,11 +29,9 @@ import {
 } from "./db-handle.ts";
 import {
   buildAgentInstructions,
-  buildClaimAgentInstructions,
   buildInvite,
   buildPubkeySealedAgentInstructions,
   inviteExpired,
-  newInviteClaimId,
   parseInvite,
   serializeInvite,
   type OrgInvite,
@@ -53,23 +50,16 @@ import {
   sealJoinAccept,
   unsealJoinAccept,
 } from "./join-accept.ts";
-import {
-  isPubkeySealedPackage,
-  sealInviteToPubkey,
-  unsealAnyInvite,
-} from "./invite-seal.ts";
-import { newInviteTransport, type InviteTransport } from "./invite-transport.ts";
+import { sealInviteToPubkey, unsealInviteWithMemberKey } from "./invite-seal.ts";
 import {
   defaultNodeUrl,
   newLastDbClient,
   resolveSocketPath,
-  type LastDbClient,
 } from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
 import {
   defaultMemberIdentityPath,
   formatReceiveBanner,
-  isMemberPubkey,
   loadOrCreateMemberIdentity,
   memberFingerprint,
   memberPrivateKeyObject,
@@ -114,14 +104,6 @@ import {
   updateConsumedInviteClaim,
   type Organization,
 } from "./storage.ts";
-import {
-  grantOrgCloudMember,
-  listOrgCloudSyncTargets,
-  registerOrgCloudSync,
-  revokeOrgCloudMember,
-  shareOrgSchema,
-  type OrgSyncRegisterResult,
-} from "./org-sync.ts";
 import { isMetaCommand, usageWrapperLine, wrapApp } from "./wrapper.ts";
 
 type Io = {
@@ -138,16 +120,11 @@ const defaultIo: Io = {
 
 export type CliDeps = {
   lastSecrets?: LastSecretsCli;
-  inviteTransport?: InviteTransport;
   newClient?: typeof newLastDbClient;
   /** Override the app launcher. */
   wrapApp?: typeof wrapApp;
   /** Selected working directory for database resolution. */
   cwd?: string;
-  /** Override the normal cloud principal grant transport. */
-  grantOrgCloudMember?: typeof grantOrgCloudMember;
-  /** Override the normal cloud principal revoke transport. */
-  revokeOrgCloudMember?: typeof revokeOrgCloudMember;
 };
 
 export async function run(
@@ -211,10 +188,6 @@ export async function run(
 
     if (command === "join") {
       return await cmdJoin(parseOptions([arg, ...tail].filter(Boolean) as string[]), io, deps);
-    }
-
-    if (command === "sync") {
-      return await cmdSync(arg, tail, io, deps);
     }
 
     if (command === "member") {
@@ -299,9 +272,8 @@ async function cmdInit(opts: Options, io: Io, deps: CliDeps): Promise<number> {
   const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
   const socketPath = resolveSocketPath(opts.socketPath);
   const newClient = deps.newClient ?? newLastDbClient;
-  const preflight = newClient({ nodeUrl, socketPath });
-  const { userHash } = await preflight.autoIdentity();
-  const client = newClient({ nodeUrl, socketPath, userHash });
+  const client = newClient({ nodeUrl, socketPath });
+  const { userHash } = await client.autoIdentity();
 
   const schemas: Config["schemas"] = {
     Organization: { schemaHash: "", schemaName: "org/Organization" },
@@ -364,7 +336,6 @@ async function cmdCreate(
     throw new Error(`organization already exists: ${slug}`);
   }
 
-  const ownerCloudPrincipal = await currentCloudPrincipal(client);
   const keys = generateOrgKeys();
   const secretSlug = e2eSecretSlug(slug);
   secrets.put({
@@ -408,7 +379,6 @@ async function cmdCreate(
     name: opts.ownerName ?? "owner",
     sign_pk: identity.signing_public_key,
     seal_pk: memberPubkeyLine(identity),
-    cloud_user_hash: ownerCloudPrincipal,
     roles: ["owner"],
     status: "active",
   };
@@ -425,9 +395,6 @@ async function cmdCreate(
   io.stdout.write(`signed genesis ${formatEpochSummary(genesis)}\n`);
   io.stdout.write(
     `tip: org db create ${slug} company && org bind ${slug} company --root ~/code/…\n`,
-  );
-  io.stderr.write(
-    "note: cloud-sync arms on `org db create` with X-LastDB-Db set to the named locator\n",
   );
   return 0;
 }
@@ -477,16 +444,6 @@ async function cmdInvite(
   const secrets = deps.lastSecrets ?? newLastSecretsCli();
   const org = await getOrganization(client, config, slug);
   const databases = await listOrgDatabases(client, config, org.slug);
-  let schemaNames: string[] = [];
-  if (typeof client.sharedSchemaNames === "function") {
-    try {
-      schemaNames = await client.sharedSchemaNames(org.orgHash);
-    } catch (err) {
-      io.stderr.write(
-        `note: could not read shared schema identities for the invite (${err instanceof Error ? err.message : String(err)})\n`,
-      );
-    }
-  }
   const pathBindings = (await listPathBindings(client, config))
     .filter((binding) => binding.orgSlug === org.slug)
     .map((binding) => ({ root: binding.root, db_slug: binding.dbSlug }));
@@ -505,7 +462,6 @@ async function cmdInvite(
       description: db.description,
       created_by: db.createdBy,
     })),
-    ...(schemaNames.length > 0 ? { schemaNames } : {}),
     pathBindings,
     ...(opts.expiresIn !== undefined ? { ttlMs: parseDurationMs(opts.expiresIn) } : {}),
   });
@@ -541,69 +497,40 @@ async function cmdInvite(
   }
 
   if (opts.to) {
-    // Preferred: encrypt-to friend orgpk1:… public key (clear-channel safe).
-    if (isMemberPubkey(opts.to)) {
-      const recipient = parseMemberPubkey(opts.to);
-      const orgPrivateKey = secrets.get(`org-${slug}-private`);
-      const sealed = sealInviteToPubkey({
-        invite,
-        recipientPubkey: recipient.encoded,
-        orgPrivateKeyB64: orgPrivateKey,
-        orgPublicKeyB64: org.orgPublicKey,
-      });
-      if (opts.outSealed) {
-        mkdirSync(dirname(opts.outSealed), { recursive: true, mode: 0o700 });
-        writeFileSync(opts.outSealed, `${sealed}\n`, {
-          encoding: "utf8",
-          mode: 0o600,
-        });
-        io.stderr.write(`wrote sealed package to ${opts.outSealed}\n`);
-      }
-      if (opts.agent) {
-        io.stdout.write(
-          buildPubkeySealedAgentInstructions({
-            invite,
-            recipientPubkey: recipient.encoded,
-            recipientFingerprint: recipient.fingerprint,
-            sealedPackage: sealed,
-          }),
-        );
-      } else {
-        io.stdout.write(`sealed org invite for fingerprint ${recipient.fingerprint}\n`);
-        io.stdout.write(`recipient=${recipient.encoded}\n`);
-        io.stdout.write(`sealed_package=${sealed}\n`);
-        io.stdout.write(
-          "friend runs: org join --sealed '<sealed_package>'  (or org receive --sealed …)\n",
-        );
-        io.stderr.write(
-          "note: package is encrypted to their public key — safe on any clear channel\n",
-        );
-      }
-      return 0;
-    }
-
-    // Legacy portable bearer token (deprecated): identity string that is not a pubkey.
-    io.stderr.write(
-      "warning: --to without orgpk1:… uses a portable bearer token (not recipient-bound). Prefer: friend runs `org receive`, then `org invite <slug> --to orgpk1:…`\n",
-    );
-    const transport = deps.inviteTransport ?? newInviteTransport();
-    const claim = await transport.deliver({
-      recipientIdentity: opts.to,
-      claimId: newInviteClaimId(),
+    const recipient = parseMemberPubkey(opts.to);
+    const orgPrivateKey = secrets.get(`org-${slug}-private`);
+    const sealed = sealInviteToPubkey({
       invite,
+      recipientPubkey: recipient.encoded,
+      orgPrivateKeyB64: orgPrivateKey,
+      orgPublicKeyB64: org.orgPublicKey,
     });
+    if (opts.outSealed) {
+      mkdirSync(dirname(opts.outSealed), { recursive: true, mode: 0o700 });
+      writeFileSync(opts.outSealed, `${sealed}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      io.stderr.write(`wrote sealed package to ${opts.outSealed}\n`);
+    }
     if (opts.agent) {
-      io.stdout.write(buildClaimAgentInstructions({ invite, claim }));
+      io.stdout.write(
+        buildPubkeySealedAgentInstructions({
+          invite,
+          recipientPubkey: recipient.encoded,
+          recipientFingerprint: recipient.fingerprint,
+          sealedPackage: sealed,
+        }),
+      );
     } else {
-      const token = claim.sealed_blob.startsWith("org-claim-")
-        ? claim.sealed_blob
-        : claim.claim_id;
-      io.stdout.write(`delivered sealed org invite for ${opts.to}\n`);
-      io.stdout.write(`claim_id=${claim.claim_id}\n`);
-      io.stdout.write(`claim_token=${token}\n`);
-      io.stdout.write(`friend runs: org join --claim '<claim_token>'\n`);
+      io.stdout.write(`sealed org invite for fingerprint ${recipient.fingerprint}\n`);
+      io.stdout.write(`recipient=${recipient.encoded}\n`);
+      io.stdout.write(`sealed_package=${sealed}\n`);
+      io.stdout.write(
+        "friend runs: org join --sealed '<sealed_package>'  (or org receive --sealed …)\n",
+      );
       io.stderr.write(
-        "warning: claim_token is a secret bearer — send only to the intended recipient\n",
+        "note: package is encrypted to their public key — safe on any clear channel\n",
       );
     }
     return 0;
@@ -708,52 +635,19 @@ async function cmdLink(
   return 0;
 }
 
-/** Live Mini user_hash for the join-accept payload. Prefer GET /api/status. */
-async function joinerMiniUserHash(
-  client: LastDbClient,
-): Promise<string | undefined> {
-  if (typeof client.nodeUserHash === "function") {
-    try {
-      const fromStatus = normalizeMiniUserHash(await client.nodeUserHash());
-      if (fromStatus) return fromStatus;
-    } catch {
-      // Fall through to auto-identity.
-    }
-  }
-  try {
-    return normalizeMiniUserHash((await client.autoIdentity()).userHash);
-  } catch {
-    return undefined;
-  }
-}
-
 async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
-  const modes = [opts.from, opts.claim, opts.sealed].filter(Boolean);
+  const modes = [opts.from, opts.sealed].filter(Boolean);
   if (modes.length === 0) {
-    throw new Error(
-      "join requires --from <invite.json>, --sealed <orgseal1:…>, or --claim <token>",
-    );
+    throw new Error("join requires --from <invite.json> or --sealed <orgseal1:…>");
   }
   if (modes.length > 1) {
-    throw new Error("join accepts only one of --from, --sealed, or --claim");
+    throw new Error("join accepts only one of --from or --sealed");
   }
 
   let invite: OrgInvite;
   if (opts.sealed) {
     const id = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
-    invite = unsealAnyInvite(opts.sealed, memberPrivateKeyObject(id));
-  } else if (opts.claim) {
-    const token = opts.claim.trim();
-    if (isPubkeySealedPackage(token)) {
-      const id = loadOrCreateMemberIdentity(opts.identityPath ?? defaultMemberIdentityPath());
-      invite = unsealAnyInvite(token, memberPrivateKeyObject(id));
-    } else {
-      invite = parseInvite(
-        await (deps.inviteTransport ?? newInviteTransport()).claim({
-          claimId: token,
-        }),
-      );
-    }
+    invite = unsealInviteWithMemberKey(opts.sealed, memberPrivateKeyObject(id));
   } else {
     invite = parseInvite(JSON.parse(readFileSync(opts.from!, "utf8")));
   }
@@ -814,33 +708,6 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     }
   }
 
-  const sharedSchemaNames = new Set(invite.schema_names ?? []);
-  if (typeof client.sharedSchemaNames === "function") {
-    try {
-      for (const name of await client.sharedSchemaNames(invite.org_hash)) {
-        sharedSchemaNames.add(name);
-      }
-    } catch (err) {
-      io.stderr.write(
-        `note: could not read restored shared schema identities (${err instanceof Error ? err.message : String(err)})\n`,
-      );
-    }
-  }
-  if (sharedSchemaNames.size > 0 && typeof client.loadSchemas === "function") {
-    const loaded = await client.loadSchemas([...sharedSchemaNames]);
-    if (loaded.skipped) {
-      io.stderr.write(`note: shared schema load skipped (${loaded.skipped})\n`);
-    } else if (loaded.failedSchemas.length > 0) {
-      io.stderr.write(
-        `shared schema load failed for: ${loaded.failedSchemas.join(", ")}\n`,
-      );
-    } else {
-      io.stdout.write(
-        `loaded shared schema identities=${loaded.schemasLoadedToDb}/${sharedSchemaNames.size}\n`,
-      );
-    }
-  }
-
   io.stdout.write(`joined organization ${formatOrg(org)}\n`);
   if (invite.databases && invite.databases.length > 0) {
     io.stdout.write(`reconstructed named databases=${invite.databases.length}\n`);
@@ -849,89 +716,31 @@ async function cmdJoin(opts: Options, io: Io, deps: CliDeps): Promise<number> {
     io.stdout.write(`reconstructed path bindings=${invite.path_bindings.length}\n`);
   }
   io.stdout.write(`e2e key stored as lastsecrets://${secretSlug}\n`);
-  io.stderr.write(
-    "note: cloud-sync arms on `org db create` with X-LastDB-Db set to the named locator\n",
-  );
 
-  // Sealed return channel: hand back our v2 signing identity so the OWNER can
-  // mint the membership epoch. Membership lands only as a signed epoch — this
-  // node holds the e2e key now, but is not in the registry until accepted.
-  if (invite.claim_nonce) {
-    const identity = loadOrCreateMemberIdentity(
-      opts.identityPath ?? defaultMemberIdentityPath(),
-    );
-    const userHash = await joinerMiniUserHash(client);
-    const accept = buildJoinAccept({
-      invite,
-      identity,
-      ...(opts.memberName !== undefined ? { memberName: opts.memberName } : {}),
-      ...(userHash ? { userHash } : {}),
-    });
-    const token = sealJoinAccept(accept, invite.e2e_key);
-    io.stdout.write(
-      `\nSend this acceptance back to the org admin over any channel (it contains no secrets):\n`,
-    );
-    io.stdout.write(`acceptance=${token}\n`);
-    io.stdout.write(
-      `next: org member add ${invite.slug} --accept '<paste acceptance=>'\n`,
-    );
-    if (userHash) {
-      io.stdout.write(
-        `joiner Mini user_hash=${userHash} (owner grant happens on member add; no org member grant)\n`,
-      );
-    } else {
-      io.stderr.write(
-        `note: could not read Mini user_hash from /api/status; after member add run: org member grant ${invite.slug} <friend Mini user_hash>\n`,
-      );
-    }
-  } else {
-    io.stderr.write(
-      "note: invite carried no claim_nonce (older CLI); you joined locally but the admin must mint your registry epoch from a fresh invite\n",
-    );
+  const identity = loadOrCreateMemberIdentity(
+    opts.identityPath ?? defaultMemberIdentityPath(),
+  );
+  const userHash = normalizeMiniUserHash(await client.nodeUserHash());
+  const accept = buildJoinAccept({
+    invite,
+    identity,
+    ...(opts.memberName !== undefined ? { memberName: opts.memberName } : {}),
+    ...(userHash ? { userHash } : {}),
+  });
+  const token = sealJoinAccept(accept, invite.e2e_key);
+  io.stdout.write(
+    `\nSend this acceptance back to the org admin over any channel (it contains no secrets):\n`,
+  );
+  io.stdout.write(`acceptance=${token}\n`);
+  io.stdout.write(
+    `next: org member add ${invite.slug} --accept '<paste acceptance=>'\n`,
+  );
+  if (userHash) {
+    io.stdout.write(`joiner Mini user_hash=${userHash}\n`);
   }
   return 0;
 }
 
-async function armOrgCloudSync(input: {
-  orgHash: string;
-  e2eKeyB64: string;
-  slug: string;
-  dbLocator: string;
-  socketPath?: string;
-  io: Io;
-}): Promise<void> {
-  const result: OrgSyncRegisterResult = await registerOrgCloudSync({
-    orgHash: input.orgHash,
-    e2eKeyB64: input.e2eKeyB64,
-    slug: input.slug,
-    dbLocator: input.dbLocator,
-    socketPath: input.socketPath,
-  });
-  if (result.ok) {
-    input.io.stdout.write(
-      `org cloud-sync armed org_hash=${result.org_hash ?? input.orgHash} sync_enabled=${result.sync_enabled ? "yes" : "no"}\n`,
-    );
-    if (result.note) input.io.stdout.write(`${result.note}\n`);
-  } else if (result.skipped) {
-    input.io.stderr.write(
-      `org cloud-sync not armed (${result.skipped}). Local membership is fine; upgrade Mini or enable cloud_sync.json for multi-device org backup.\n`,
-    );
-  } else {
-    input.io.stderr.write(
-      `org cloud-sync register failed: ${result.error ?? "unknown"}\n`,
-    );
-  }
-}
-
-/**
- * Cloud live-access membership (Exemem principal registry on the org head).
- * Does not rotate the shared E2E key — kick only stops download/upload of new
- * cloud bytes for that user.
- *
- *   org member grant <slug> <user_hash> [--role writer|reader]
- *   org member revoke <slug> <user_hash>
- *   org member leave <slug>
- */
 async function cmdMember(
   sub: string | undefined,
   rest: string[],
@@ -941,11 +750,8 @@ async function cmdMember(
   if (!sub || sub === "help" || sub === "--help") {
     io.stdout.write(
       "org member list <slug> [--json]        # registry from the canonical signed epoch\n" +
-        "org member set-role <slug> <member_id> --role owner|admin|member  # sign and publish\n" +
-        "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]  # owner mints epoch N+1 and grants Mini principal\n" +
-        "org member grant <slug> <user_hash> [--role writer|reader]\n" +
-        "org member revoke <slug> <user_hash>\n" +
-        "org member leave <slug>\n",
+        "org member set-role <slug> <member_id> --role owner|admin|member\n" +
+        "org member add <slug> --accept 'orgaccept1:…' [--role R] [--name N]\n",
     );
     return 0;
   }
@@ -1004,9 +810,8 @@ async function cmdMember(
       io,
       deps,
       identityPath: addOpts.identityPath,
-      ...(member.cloud_user_hash ? { storageRecovery: { action: "grant", principal: member.cloud_user_hash } as const } : {}),
       beforeStore: consumeJoinClaim(client, config, { claimNonce: accept.payload.claim_nonce,
-        orgHash: org.orgHash, memberId: member.member_id, epochHash: "", consumedAt }, member.cloud_user_hash),
+        orgHash: org.orgHash, memberId: member.member_id, epochHash: "", consumedAt }),
       apply: (members) => {
         appendNewMember(members, member);
         return { members };
@@ -1018,24 +823,11 @@ async function cmdMember(
         memberId: member.member_id, epochHash: epoch.epoch_hash, consumedAt,
       });
     } catch {
-      throw new Error(`the claim epoch stamp failed after the signed epoch write; ${authorityRecovery({ client, config, org,
-        identityPath: addOpts.identityPath,
-        ...(member.cloud_user_hash ? { storageRecovery: { action: "grant", principal: member.cloud_user_hash } as const } : {}) })}`);
+      throw new Error("the claim epoch stamp failed after the signed epoch write");
     }
     io.stdout.write(
       `added ${member.member_id} name=${JSON.stringify(member.name)} role=${member.roles[0]} — signed ${formatEpochSummary(epoch)}\n`,
     );
-    await grantJoinAcceptPrincipal({
-      slug,
-      orgHash: org.orgHash,
-      userHash: accept.payload.user_hash,
-      socketPath: addOpts.socketPath ?? config.nodeSocketPath,
-      io,
-      deps,
-      requireCloudGrant: epoch.cloudPublished,
-      recoveryCommand: authorityCommand({ client, config, org, identityPath: addOpts.identityPath },
-        ["member", "grant", slug, member.cloud_user_hash ?? "<member-account-hash>", "--role", "writer"]),
-    });
     return 0;
   }
   if (sub === "list") {
@@ -1073,64 +865,6 @@ async function cmdMember(
     for (const member of tip.payload.members) {
       io.stdout.write(`${formatEpochMember(member, resolved.chain)}\n`);
     }
-    return 0;
-  }
-  const opts = parseOptions(rest);
-  if (sub === "grant") {
-    const slug = rest[0];
-    const userHash = rest[1];
-    if (!slug || !userHash) {
-      throw new Error("usage: org member grant <slug> <user_hash> [--role writer|reader]");
-    }
-    const grantOpts = parseOptions(rest.slice(2));
-    const { client, config } = await loadSession(grantOpts, deps);
-    assertOwnerSocket(config);
-    const org = await getOrganization(client, config, slug);
-    const role = grantOpts.role ?? "writer";
-    const result = await grantOrgCloudMember({
-      orgHash: org.orgHash,
-      targetUserHash: userHash,
-      role,
-      socketPath: grantOpts.socketPath ?? config.nodeSocketPath,
-    });
-    if (!result.ok) throw new Error(result.error ?? "grant failed");
-    io.stdout.write(
-      `granted cloud access org=${slug} principal=${result.principal_hash ?? userHash} role=${result.role ?? role}\n`,
-    );
-    return 0;
-  }
-  if (sub === "revoke") {
-    const slug = rest[0];
-    const userHash = rest[1];
-    if (!slug || !userHash) {
-      throw new Error("usage: org member revoke <slug> <user_hash>");
-    }
-    const revOpts = parseOptions(rest.slice(2));
-    const { client, config } = await loadSession(revOpts, deps);
-    assertOwnerSocket(config);
-    const org = await getOrganization(client, config, slug);
-    const result = await revokeOrgCloudMember({
-      orgHash: org.orgHash,
-      targetUserHash: userHash,
-      socketPath: revOpts.socketPath ?? config.nodeSocketPath,
-    });
-    if (!result.ok) throw new Error(result.error ?? "revoke failed");
-    io.stdout.write(`revoked cloud access org=${slug} principal=${userHash}\n`);
-    return 0;
-  }
-  if (sub === "leave") {
-    const slug = rest[0];
-    if (!slug) throw new Error("usage: org member leave <slug>");
-    const leaveOpts = parseOptions(rest.slice(1));
-    const { client, config } = await loadSession(leaveOpts, deps);
-    assertOwnerSocket(config);
-    const org = await getOrganization(client, config, slug);
-    const result = await revokeOrgCloudMember({
-      orgHash: org.orgHash,
-      socketPath: leaveOpts.socketPath ?? config.nodeSocketPath,
-    });
-    if (!result.ok) throw new Error(result.error ?? "leave failed");
-    io.stdout.write(`left cloud membership for org=${slug} (local E2E key unchanged)\n`);
     return 0;
   }
   throw new Error(`unknown member subcommand: ${sub}`);
@@ -1173,13 +907,6 @@ async function cmdEpoch(
   const { client, config } = await loadSession(opts, deps);
   const org = await getOrganization(client, config, slug);
 
-  if (sub === "publish" || sub === "bind-owner") {
-    const context = { client, config, org, socketPath: opts.socketPath, identityPath: opts.identityPath };
-    const receipt = sub === "publish" ? await publishCloudAuthority(context)
-      : await bindOriginalOwner(context, (apply) => mintNextEpoch({ ...context, io, deps, apply, requirePublication: true }));
-    io.stdout.write(`${JSON.stringify(receipt)}\n`);
-    return 0;
-  }
   if (sub === "sign") {
     const epoch = await mintNextEpoch({
       client,
@@ -1329,8 +1056,7 @@ function revokeMember(members: EpochMember[], memberId: string): void {
 
 /**
  * Registry kick: mint a revocation epoch (status revoked, non-retroactive —
- * events authorized by earlier epochs stay valid) and revoke the recorded
- * Mini cloud principal without rotating the shared E2E key.
+ * events authorized by earlier epochs stay valid).
  */
 async function cmdKick(
   slug: string | undefined,
@@ -1354,9 +1080,7 @@ async function cmdKick(
   const target = resolved.tip.payload.members.find((member) => member.member_id === memberId);
   if (!target) throw new Error(`member not found in registry: ${memberId}`);
   if (target.status === "revoked") {
-    const context = { client, config, org, identityPath: opts.identityPath,
-      ...(target.cloud_user_hash ? { storageRecovery: { action: "revoke", principal: target.cloud_user_hash } as const } : {}) };
-    throw new Error(`member already revoked: ${memberId}; ${authorityRecovery(context)}`);
+    throw new Error(`member already revoked: ${memberId}`);
   }
   const epoch = await mintNextEpoch({
     client,
@@ -1365,12 +1089,6 @@ async function cmdKick(
     io,
     deps,
     identityPath: opts.identityPath,
-    ...(target.cloud_user_hash ? { storageRecovery: { action: "revoke", principal: target.cloud_user_hash } as const } : {}),
-    beforeStore: async (enrolled) => {
-      if (enrolled && !normalizeMiniUserHash(target.cloud_user_hash)) {
-        throw new Error("the enrolled member has no signed Mini account hash; the storage revoke cannot be completed");
-      }
-    },
     apply: (members) => {
       revokeMember(members, memberId);
       return { members };
@@ -1379,27 +1097,6 @@ async function cmdKick(
   io.stdout.write(
     `kicked ${memberId} from the ${org.slug} registry — signed ${formatEpochSummary(epoch)}\n`,
   );
-  if (target.cloud_user_hash) {
-    const revoke = deps.revokeOrgCloudMember ?? revokeOrgCloudMember;
-    const result = await revoke({
-      orgHash: org.orgHash,
-      targetUserHash: target.cloud_user_hash,
-      socketPath: opts.socketPath ?? config.nodeSocketPath,
-    });
-    if (result.ok) {
-      io.stdout.write(
-        `revoked cloud access org=${org.slug} principal=${target.cloud_user_hash}\n`,
-      );
-    } else {
-      const message = `signed registry updated, but storage revoke failed; next: ${authorityCommand({ client, config, org, identityPath: opts.identityPath }, ["member", "revoke", org.slug, target.cloud_user_hash])}`;
-      if (epoch.cloudPublished) throw new Error(message);
-      io.stderr.write(`${message}\n`);
-    }
-  } else {
-    io.stderr.write(
-      `note: member ${memberId} has no recorded Mini user_hash; to stop their live cloud sync run: org member revoke ${org.slug} <user_hash>\n`,
-    );
-  }
   return 0;
 }
 
@@ -1511,71 +1208,9 @@ function epochUsage(): string {
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
                         [--repo-admins JSON] [--force]
   org epoch show <slug> [EPOCH_HASH] [--json]
-  org epoch publish <slug> [--identity PATH]   # publish the verified current chain
-  org epoch bind-owner <slug> [--identity PATH] # enroll the unchanged original owner
   org epoch verify <slug> [--json]
   org epoch log <slug>
 `;
-}
-
-async function cmdSync(
-  sub: string | undefined,
-  rest: string[],
-  io: Io,
-  deps: CliDeps,
-): Promise<number> {
-  const opts = parseOptions(rest);
-  if (!sub || sub === "status" || sub === "targets") {
-    const listed = await listOrgCloudSyncTargets({
-      socketPath: opts.socketPath,
-    });
-    if (listed.skipped) {
-      io.stdout.write(`org sync: ${listed.skipped}\n`);
-      return 0;
-    }
-    if (listed.error) {
-      throw new Error(listed.error);
-    }
-    io.stdout.write(
-      `sync_enabled=${listed.sync_enabled ? "yes" : "no"} targets=${listed.targets.length}\n`,
-    );
-    for (const t of listed.targets) {
-      io.stdout.write(
-        `  org_hash=${t.org_hash} slug=${t.slug || "-"} active=${t.active}\n`,
-      );
-    }
-    if (listed.target_prefixes.length > 0) {
-      io.stdout.write(`engine_prefixes=${listed.target_prefixes.join(",")}\n`);
-    }
-    return 0;
-  }
-  if (sub === "arm" && rest[0]) {
-    const slug = rest[0]!;
-    const armOpts = parseOptions(rest.slice(1));
-    const { client, config } = await loadSession(armOpts, deps);
-    const secrets = deps.lastSecrets ?? newLastSecretsCli();
-    const org = await getOrganization(client, config, slug);
-    const dbSlug = rest[1] && !rest[1].startsWith("-") ? rest[1] : org.defaultDb;
-    if (!dbSlug) {
-      throw new Error(
-        "org sync arm requires a named db (org sync arm <slug> <db-slug> or org db create first)",
-      );
-    }
-    const e2eKey = secrets.get(e2eSecretSlug(slug));
-    await armOrgCloudSync({
-      orgHash: org.orgHash,
-      e2eKeyB64: e2eKey,
-      slug: org.slug,
-      dbLocator: formatDbLocator(orgDb(org.slug, dbSlug)),
-      socketPath: armOpts.socketPath ?? config.nodeSocketPath,
-      io,
-    });
-    return 0;
-  }
-  io.stdout.write(
-    `org sync subcommands:\n  org sync status\n  org sync arm <slug> [db-slug]\n`,
-  );
-  return 0;
 }
 
 async function cmdDb(
@@ -1596,8 +1231,7 @@ async function cmdDb(
     }
     const opts = parseOptions(more);
     // OrgDatabase is registry metadata. Keep it in the personal registry even
-    // when the caller currently works inside a named org DB. The named locator
-    // belongs to the cloud-sync registration below, not to this metadata write.
+    // when the caller currently works inside a named org DB.
     const { client, config } = await loadSession(opts, deps, formatDbLocator(personalDb()));
     const org = await getOrganization(client, config, orgSlug);
     const name = opts.name ?? dbSlug;
@@ -1628,55 +1262,7 @@ async function cmdDb(
     io.stdout.write(
       `cohabits this LastDB node under org_hash=${org.orgHash}; key material is lastsecrets only\n`,
     );
-    io.stdout.write(
-      "registry: org metadata stays in lastdb://personal; use org db share-schema or declare-in-DB for app-schema membership\n",
-    );
-    const secrets = deps.lastSecrets ?? newLastSecretsCli();
-    const locator = formatDbLocator(orgDb(org.slug, dbSlug));
-    const e2eKey = secrets.get(e2eSecretSlug(org.slug));
-    await armOrgCloudSync({
-      orgHash: org.orgHash,
-      e2eKeyB64: e2eKey,
-      slug: org.slug,
-      dbLocator: locator,
-      socketPath: opts.socketPath ?? config.nodeSocketPath,
-      io,
-    });
-    return 0;
-  }
-
-  if (sub === "share-schema") {
-    const [orgSlug, dbSlug, schemaName, ...more] = rest;
-    if (!orgSlug || !dbSlug || !schemaName) {
-      throw new Error(
-        "usage: org db share-schema <org-slug> <db-slug> <schema> [--source lastdb://personal]",
-      );
-    }
-    const opts = parseOptions(more);
-    const { client, config } = await loadSession(opts, deps);
-    const org = await getOrganization(client, config, orgSlug);
-    const secrets = deps.lastSecrets ?? newLastSecretsCli();
-    const e2eKey = secrets.get(e2eSecretSlug(org.slug));
-    const locator = formatDbLocator(orgDb(org.slug, dbSlug));
-    const source = typeof opts.source === "string" ? opts.source : "lastdb://personal";
-    const result = await shareOrgSchema({
-      dbLocator: locator,
-      schemaName,
-      orgHash: org.orgHash,
-      e2eKeyB64: e2eKey,
-      sourceDbLocator: source,
-      socketPath: opts.socketPath ?? config.nodeSocketPath,
-    });
-    if (result.skipped) {
-      io.stderr.write(`org db share-schema skipped: ${result.skipped}\n`);
-      return 0;
-    }
-    if (!result.ok) {
-      throw new Error(result.error ?? "share-schema failed");
-    }
-    io.stdout.write(
-      `shared ${result.schema_name} into ${result.target_db_locator} from ${result.source_db_locator}\n`,
-    );
+    io.stdout.write("registry: org metadata stays in lastdb://personal\n");
     return 0;
   }
 
@@ -1896,7 +1482,7 @@ async function loadSession(
   const nodeUrl = opts.nodeUrl ?? config.nodeUrl;
   const socketPath = resolveSocketPath(opts.socketPath ?? config.nodeSocketPath);
   const newClient = deps.newClient ?? newLastDbClient;
-  const client = newClient({ nodeUrl, socketPath, userHash: config.userHash, dbLocator });
+  const client = newClient({ nodeUrl, socketPath, dbLocator });
   return { client, config: { ...config, nodeUrl, nodeSocketPath: socketPath } };
 }
 
@@ -1905,7 +1491,6 @@ type Options = {
   nodeUrl?: string;
   socketPath?: string;
   db?: string;
-  source?: string;
   name?: string;
   description?: string;
   out?: string;
@@ -1914,14 +1499,13 @@ type Options = {
   agent?: boolean;
   from?: string;
   to?: string;
-  claim?: string;
   sealed?: string;
   identityPath?: string;
   root?: string;
   cwd?: string;
   defaultDb?: string;
   json?: boolean;
-  /** Registry role for `org member grant` (`writer` | `reader`). */
+  /** Signed registry role for `org member add` and `org member set-role`. */
   role?: string;
   /** Owner display name for the genesis epoch member entry. */
   ownerName?: string;
@@ -2028,9 +1612,6 @@ function parseOptions(args: string[]): Options {
       case "--socket-path":
         opts.socketPath = next();
         break;
-      case "--source":
-        opts.source = next();
-        break;
       case "--name":
         opts.name = next();
         break;
@@ -2048,9 +1629,6 @@ function parseOptions(args: string[]): Options {
         break;
       case "--to":
         opts.to = next();
-        break;
-      case "--claim":
-        opts.claim = next();
         break;
       case "--sealed":
         opts.sealed = next();
@@ -2157,17 +1735,12 @@ Other:
   org invite <slug> … --expires-in 72h         # invite lifetime (default 72h; one-time claim)
   org join --sealed orgseal1:… [--member-name N]  # join; prints acceptance=orgaccept1:… to send back
   org join --from invite.json
-  org join --claim CLAIM_TOKEN                 # legacy portable bearer token
-  org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints epoch N+1 + grants Mini principal
-  org kick <slug> <member_id>                  # revoke registry + cloud principal; keep shared E2E key
-  org sync status | arm <slug> [db-slug]       # cloud-sync targets (armed on org db create)
+  org member add <slug> --accept 'orgaccept1:…' [--role R]  # OWNER mints epoch N+1
+  org kick <slug> <member_id>                  # revoke signed registry membership
   org member list <slug> [--json]              # registry from the canonical signed epoch chain
-  org member set-role <slug> <member_id> --role owner|admin|member  # sign and publish
+  org member set-role <slug> <member_id> --role owner|admin|member
   org epoch sign <slug> [--add-member JSON|@file] [--revoke MEMBER_ID]
   org epoch show|verify|log <slug>             # owner-signed membership epochs (see org epoch help)
-  org member grant <slug> <user_hash> [--role writer|reader]
-  org member revoke <slug> <user_hash>         # kick: stop their live cloud sync (no E2E rotate)
-  org member leave <slug>                      # self-revoke cloud membership
   org admin-slice                              # metadata-only JSON for admin delivery
   org schema-json
   org help
@@ -2181,9 +1754,7 @@ Env: ${LASTDB_DB_ENV} is set when wrapping apps (and --db is injected).
 function dbUsage(): string {
   return `org db subcommands:
   org db create <org-slug> <db-slug> [--name N] [--description D]
-    # writes org metadata to lastdb://personal and arms sync for the named DB
-  org db share-schema <org-slug> <db-slug> <schema> [--source lastdb://personal]
-    # adds app-schema membership to the named DB catalog
+    # writes org metadata to lastdb://personal
   org db list [org-slug]
   org db show <org-slug> <db-slug>
 `;

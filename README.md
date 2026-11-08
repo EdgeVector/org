@@ -27,7 +27,7 @@ only as `lastsecrets://org-<slug>-e2e`.
 | **Depends on** | LastDB Mini (`lastdbd`) + [LastSecrets](https://github.com/EdgeVector/lastsecrets) |
 | **Exemem account** | **Not required** for create, invite, or join |
 
-GitHub is the source and review host. Use `gh` for PRs. The old Forgejo copy is frozen.
+GitHub is the source and review host. Use `gh` for PRs.
 
 ---
 
@@ -36,10 +36,6 @@ GitHub is the source and review host. Use `gh` for PRs. The old Forgejo copy is 
 Needs **macOS Apple Silicon**, [Homebrew](https://brew.sh), and [Bun](https://bun.sh).
 
 CAUTION: Use the required Mini safe upgrade before you install this Org version.
-
-This version requires `/api/org/authority/status` and `/api/org/authority/publish` on the selected owner socket. A missing route refuses a signed member change.
-
-It does not treat a missing route as local-only cloud state. See [the authority and release requirements](docs/CLOUD-AUTHORITY.md).
 
 ### Option A — whole app stack (recommended)
 
@@ -105,9 +101,7 @@ org show friends
 ```
 
 `org db create` writes the organization and named-DB records to the personal
-registry (`lastdb://personal`) and arms cloud sync for the named locator. It
-does not add `org/OrgDatabase` to the named DB catalog. Use `org db share-schema`
-or the app's `declare-in-DB` flow to add app-schema membership.
+registry (`lastdb://personal`).
 
 ---
 
@@ -208,73 +202,20 @@ Resolution order: **explicit `--db` → cwd under a bound root (longest prefix)
 | `org invite <slug> --out FILE [--agent]` | Secret invite file (OOB only) |
 | `org join --sealed orgseal1:…` | Join from pubkey-sealed package |
 | `org join --from FILE` | Join from secret invite file |
-| `org join --claim TOKEN` | Legacy portable bearer claim |
 | `org db create/list/show` | Named shared DB metadata in the personal registry |
-| `org db share-schema` | Add an app schema to a named DB catalog |
 | `org bind <org> <db> --root PATH` | Map a filesystem root → that DB |
 | `org resolve` / `use` / `unuse` / `current` | Write-target resolution |
 | `org kanban …` / `org run <app> …` | Resolve DB, then run the app |
-| `org sync status` / `arm` | Org cloud-sync targets on Mini |
 
 ---
-
-## Cloud membership (kick without key rotation)
-
-Live download/upload of an org cloud head is gated by **Exemem principal
-membership** (registry on the head id), not by possession of the shared E2E key.
-
-```bash
-# after friend joins, owner `org member add` grants their Mini user_hash
-# (join-accept carries user_hash from GET /api/status). Manual fallback:
-org member grant edgevector <their_user_hash> --role writer
-
-# kick revokes the recorded cloud principal and keeps the shared E2E key
-org kick edgevector <member_id>
-
-# kick — they keep local data + E2E key, but cloud presigns stop:
-org member revoke edgevector <their_user_hash>
-
-# leave yourself:
-org member leave edgevector
-```
-
-Requires a Mini with cloud sync enabled and a storage_service build that
-implements `register_db_member` / `unregister_db_member`. Create/join still
-stores the E2E key in LastSecrets either way.
-
-### Cloud membership kick proof
-
-The live proof uses two throwaway Minis and two Exemem principals. It grants
-the member, checks list or presign access, revokes the member, checks HTTP 403,
-checks owner access, and checks that the shared E2E key stays unchanged.
-
-Run the canonical proof from a Last Stack checkout after the DEV cloud deploy:
-
-```bash
-export ORG_CLOUD_MEMBERSHIP_ORG_SLUG=<slug>
-export ORG_CLOUD_MEMBERSHIP_MEMBER_USER_HASH=<member-user-hash>
-export ORG_CLOUD_MEMBERSHIP_OWNER_API_KEY_REF=lastsecrets://<owner-api-key>
-export ORG_CLOUD_MEMBERSHIP_MEMBER_API_KEY_REF=lastsecrets://<member-api-key>
-export ORG_CLOUD_MEMBERSHIP_STORAGE_URL=https://<dev-storage-host>
-export ORG_CLOUD_MEMBERSHIP_OWNER_SOCKET=<throwaway-owner-socket>
-last-stack-north-star-proof --live north-star-org-cloud-principal-membership
-```
-
-Use `lastsecrets://` locators only. The proof does not print or store secret
-values, and it must never use the primary `~/.lastdb` socket.
 
 ## What works today vs later
 
 | Works now | Needs more setup / later |
 |-----------|---------------------------|
-| Create org, invite/join via pubkey seal | Continuous multi-device **data** sync (enable Mini cloud sync / `cloud_sync.json`) |
+| Create org, invite/join via pubkey seal | Continuous multi-device data sync |
 | Membership + E2E key on each friend’s node | Cryptographic member removal (rotate E2E + re-invite remaining members) |
 | Named DBs + path bind + app wrapper | Fancy membership UI / People directory |
-| Arm org cloud-sync target on create/join | — |
-
-Create/join call Mini `POST /api/org/sync/register` so the node can use an
-encrypted org log **when cloud sync is configured**. Without cloud, membership
-and local keys still work; remote nodes will not converge on shared rows yet.
 
 ---
 
@@ -290,7 +231,7 @@ and local keys still work; remote nodes will not converge on shared rows yet.
   yourself; nothing secret rides plaintext in the package.
 - Org records store only `lastsecrets://…` locators.
 - Never paste E2E keys or invite JSON into Brain, Kanban, chat, git, or PRs.
-- `org kick` revokes signed membership and the recorded cloud principal.
+- `org kick` revokes signed membership.
   It keeps the shared org encryption key. A former member can keep prior files.
 
 ---

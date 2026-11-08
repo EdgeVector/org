@@ -25,7 +25,7 @@ fi
 
 # 4. venue pin
 case "$(head -n 1 .last-stack/pr-venue)" in
-  github|forgejo|lastgit) : ;;
+  github) : ;;
   *) echo "unrecognized pr-venue: $(head -n 1 .last-stack/pr-venue)" >&2; exit 1 ;;
 esac
 

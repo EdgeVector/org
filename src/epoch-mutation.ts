@@ -1,33 +1,47 @@
-import {
-  admitCloudAuthorityRequest,
-  enrolledCloudAuthority,
-  publishCloudAuthority,
-  verifiedAuthorityChain,
-  type AuthorityContext,
-  type AuthorityReceipt,
-} from "./cloud-authority.ts";
-import { buildEpochPayload, signEpochPayload, type OrgEpoch } from "./epoch.ts";
+import type { Config } from "./config.ts";
+import { buildEpochPayload, resolveCanonicalChain, signEpochPayload, type OrgEpoch } from "./epoch.ts";
+import { isLoopbackNodeUrl, type LastDbClient } from "./lastdb.ts";
 import { newLastSecretsCli, type LastSecretsCli } from "./lastsecrets.ts";
 import type { EpochMutation } from "./member-roles.ts";
-import { putOrgEpoch } from "./storage.ts";
+import { listOrgEpochs, putOrgEpoch, type Organization } from "./storage.ts";
 
-export type EpochMutationResult = OrgEpoch & {
-  cloudPublished: boolean;
-  cloudReceipt?: AuthorityReceipt;
+export type AuthorityContext = {
+  client: LastDbClient;
+  config: Config;
+  org: Organization;
+  socketPath?: string;
+  identityPath?: string;
 };
+
+export type EpochMutationResult = OrgEpoch;
+
+export function assertOwnerSocket(config: Config): void {
+  if (!isLoopbackNodeUrl(config.nodeUrl)) {
+    throw new Error("org epoch changes require one selected local owner socket");
+  }
+}
+
+export async function verifiedAuthorityChain(context: AuthorityContext): Promise<OrgEpoch[]> {
+  assertOwnerSocket(context.config);
+  const listing = await listOrgEpochs(context.client, context.config, context.org.orgHash);
+  const resolved = resolveCanonicalChain(listing.epochs, {
+    orgHash: context.org.orgHash,
+    orgPublicKeyB64: context.org.orgPublicKey,
+  });
+  if (listing.malformed.length || resolved.invalid.length || !resolved.ok || !resolved.tip) {
+    throw new Error(`refusing local epoch change: ${resolved.error ?? "invalid signed epoch records"}`);
+  }
+  return resolved.chain;
+}
 
 export async function mintNextEpoch(input: AuthorityContext & {
   io: unknown;
   deps: { lastSecrets?: LastSecretsCli };
   apply: EpochMutation;
-  beforeStore?: (enrolled: boolean) => Promise<void>;
-  requirePublication?: boolean;
+  beforeStore?: () => Promise<void>;
 }): Promise<EpochMutationResult> {
-  // All mutation paths use the same strict chain as publication. An invalid
-  // indexed record cannot consume a one-time claim or create an unpublishable tip.
   const chain = await verifiedAuthorityChain(input);
   const tip = chain[chain.length - 1]!;
-  const enrolled = await enrolledCloudAuthority(input, chain, true);
   const working = tip.payload.members.map((member) => ({ ...member, roles: member.roles.slice() }));
   const applied = input.apply(working, tip);
   const repoAdmins = applied.repoAdmins ?? tip.payload.repo_admins;
@@ -42,9 +56,7 @@ export async function mintNextEpoch(input: AuthorityContext & {
     members: applied.members,
     ...(repoAdmins !== undefined ? { repoAdmins } : {}),
   }), keyClient.get(`org-${input.org.slug}-private`));
-  if (enrolled || input.requirePublication) admitCloudAuthorityRequest(input, [...chain, epoch]);
-  if (input.beforeStore) await input.beforeStore(enrolled);
+  if (input.beforeStore) await input.beforeStore();
   await putOrgEpoch(input.client, input.config, epoch);
-  const cloudReceipt = enrolled ? await publishCloudAuthority(input) : undefined;
-  return { ...epoch, cloudPublished: enrolled, ...(cloudReceipt ? { cloudReceipt } : {}) };
+  return epoch;
 }

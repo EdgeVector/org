@@ -18,15 +18,6 @@ import { dirname, join } from "node:path";
 
 export const MEMBER_PUBKEY_PREFIX = "orgpk1:" as const;
 
-export type MemberSealIdentityV1 = {
-  version: 1;
-  /** Base64 SPKI DER (X25519). */
-  public_key: string;
-  /** Base64 PKCS8 DER (X25519). */
-  private_key: string;
-  created_at: string;
-};
-
 export type MemberSealIdentity = {
   version: 2;
   /** Base64 SPKI DER (X25519). */
@@ -94,15 +85,6 @@ export function parseMemberPubkey(input: string): {
   return { raw, encoded, fingerprint: fingerprintFromRawPublic(raw) };
 }
 
-export function isMemberPubkey(input: string): boolean {
-  try {
-    parseMemberPubkey(input);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function generateMemberSealIdentity(): MemberSealIdentity {
   const seal = generateKeyPairSync("x25519");
   const signing = generateKeyPairSync("ed25519");
@@ -136,30 +118,15 @@ export function loadOrCreateMemberIdentity(
 }
 
 export function loadMemberIdentity(path = defaultMemberIdentityPath()): MemberSealIdentity {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as
-    | MemberSealIdentityV1
-    | MemberSealIdentity;
-  if (!raw.public_key || !raw.private_key || !raw.created_at) {
-    throw new Error(`invalid member identity file: ${path}`);
-  }
-  if (raw.version === 1) {
-    const signing = generateKeyPairSync("ed25519");
-    const migrated: MemberSealIdentity = {
-      version: 2,
-      public_key: raw.public_key,
-      private_key: raw.private_key,
-      signing_public_key: signing.publicKey
-        .export({ type: "spki", format: "der" })
-        .toString("base64"),
-      signing_private_key: signing.privateKey
-        .export({ type: "pkcs8", format: "der" })
-        .toString("base64"),
-      created_at: raw.created_at,
-    };
-    saveMemberIdentity(migrated, path);
-    return migrated;
-  }
-  if (raw.version !== 2 || !raw.signing_public_key || !raw.signing_private_key) {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as MemberSealIdentity;
+  if (
+    raw.version !== 2 ||
+    !raw.public_key ||
+    !raw.private_key ||
+    !raw.signing_public_key ||
+    !raw.signing_private_key ||
+    !raw.created_at
+  ) {
     throw new Error(`invalid member identity file: ${path}`);
   }
   return raw;

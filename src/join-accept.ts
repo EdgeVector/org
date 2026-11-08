@@ -50,8 +50,7 @@ export type JoinAcceptPayload = {
   issued_at: string;
   /**
    * Optional Mini `user_hash` from the joiner node (`GET /api/status`).
-   * The owner uses this on `org member add` to grant Exemem principal
-   * membership on the org head. Absent on older joiners.
+   * Absent when the joiner node reported no account hash.
    */
   user_hash?: string;
 };
@@ -72,7 +71,7 @@ function acceptAesKey(e2eKeyB64: string): Buffer {
 
 /**
  * Normalize a Mini user_hash for the join-accept payload.
- * Empty, whitespace, or over-long values are omitted (grant stays fail-closed).
+ * Empty, whitespace, or over-long values are omitted.
  */
 export function normalizeMiniUserHash(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
@@ -91,11 +90,6 @@ export function buildJoinAccept(input: {
   /** Joiner Mini user_hash (`GET /api/status`); omitted when unknown. */
   userHash?: string;
 }): JoinAccept {
-  if (!input.invite.claim_nonce) {
-    throw new Error(
-      "invite has no claim_nonce (issued by an older org CLI); ask the admin for a fresh invite to be added to the member registry",
-    );
-  }
   const fingerprint = memberFingerprint(input.identity);
   const userHash = normalizeMiniUserHash(input.userHash);
   const payload: JoinAcceptPayload = {
@@ -103,7 +97,7 @@ export function buildJoinAccept(input: {
     org_hash: input.invite.org_hash,
     slug: input.invite.slug,
     claim_nonce: input.invite.claim_nonce,
-    expires_at: input.invite.expires_at ?? "",
+    expires_at: input.invite.expires_at,
     member: {
       member_id: fingerprint,
       name: input.memberName ?? `member-${fingerprint.slice(0, 8)}`,
@@ -201,7 +195,6 @@ export function unsealJoinAccept(token: string, e2eKeyB64: string): JoinAccept {
 
 /** True when the acceptance's copied invite expiry is in the past. */
 export function joinAcceptExpired(accept: JoinAccept, now = new Date()): boolean {
-  if (!accept.payload.expires_at) return false;
   const expires = Date.parse(accept.payload.expires_at);
   if (Number.isNaN(expires)) return true; // unparseable expiry fails closed
   return now.getTime() > expires;
@@ -223,13 +216,10 @@ function assertAcceptShape(raw: unknown): JoinAccept {
   if (payload.v !== ACCEPT_VERSION) {
     throw new Error(`unsupported acceptance payload version: ${String(payload.v)}`);
   }
-  for (const key of ["org_hash", "slug", "claim_nonce", "issued_at"] as const) {
+  for (const key of ["org_hash", "slug", "claim_nonce", "issued_at", "expires_at"] as const) {
     if (typeof payload[key] !== "string" || (payload[key] as string).length === 0) {
       throw new Error(`acceptance missing field: ${key}`);
     }
-  }
-  if (typeof payload.expires_at !== "string") {
-    throw new Error("acceptance expires_at must be a string");
   }
   const member = payload.member;
   if (typeof member !== "object" || member === null || Array.isArray(member)) {
